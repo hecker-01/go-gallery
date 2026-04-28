@@ -96,9 +96,11 @@ func isContextErr(err error) bool {
 // cursor (empty string for the first call) and returns the page items, the
 // next cursor, and an error. When nextCursor is empty the loop ends.
 // The returned channel is closed when pagination finishes or ctx is cancelled.
+// An optional onError callback is called when fetchPage returns a non-nil error.
 func Paginate[T any](
 	ctx context.Context,
 	fetchPage func(ctx context.Context, cursor string) ([]T, string, error),
+	onError ...func(error),
 ) <-chan T {
 	out := make(chan T)
 	go func() {
@@ -107,6 +109,9 @@ func Paginate[T any](
 		for {
 			items, next, err := fetchPage(ctx, cursor)
 			if err != nil {
+				if len(onError) > 0 && onError[0] != nil {
+					onError[0](err)
+				}
 				return
 			}
 			for _, item := range items {

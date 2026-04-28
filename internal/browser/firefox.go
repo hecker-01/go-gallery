@@ -71,6 +71,12 @@ func ReadFirefoxCookies(dbPath string) (*cookiejar.Jar, error) {
 			continue
 		}
 
+		// Sanitize the value: strip surrounding double-quotes (Firefox
+		// sometimes stores cookie-values as quoted-strings) and then remove
+		// any remaining '"' bytes, which net/http will drop anyway.
+		value = strings.Trim(value, "\"")
+		value = strings.ReplaceAll(value, "\"", "")
+
 		cookies = append(cookies, &http.Cookie{
 			Name:     name,
 			Value:    value,
@@ -141,8 +147,8 @@ func firefoxConfigDir() (string, error) {
 // configDir is prepended for relative paths.
 func parseProfilesIni(ini, configDir string) (string, error) {
 	type section struct {
-		name      string
-		fields    map[string]string
+		name   string
+		fields map[string]string
 	}
 
 	var sections []section

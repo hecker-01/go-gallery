@@ -29,6 +29,10 @@ func (e *TwitterBookmarksExtractor) Items(ctx context.Context) <-chan extractor.
 
 		for item := range extractor.Paginate(ctx, func(ctx context.Context, cursor string) ([]extractor.Item, string, error) {
 			return e.fetchBookmarksPage(ctx, cursor)
+		}, func(err error) {
+			if e.Params.Logger != nil {
+				e.Params.Logger.Error("fetch bookmarks page failed", "error", err)
+			}
 		}) {
 			select {
 			case out <- item:

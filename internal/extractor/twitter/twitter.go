@@ -7,6 +7,8 @@ package twitter
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,9 +24,9 @@ import (
 
 // publicBearerToken is the permanent bearer token used by the Twitter web
 // client. It is widely documented and used by tools like gallery-dl.
-const publicBearerToken = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I45S0571UAg%3DekV6BuODpif9TSUIvnGl8mD4ZEhCanYnHHmMITITnXU"
+const publicBearerToken = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
 
-const guestTokenURL = "https://api.twitter.com/1.1/guest/activate.json"
+const guestTokenURL = "https://api.x.com/1.1/guest/activate.json"
 const guestTokenCacheKey = "twitter:guest_token"
 const guestTokenTTL = 3 * time.Hour
 
@@ -38,15 +40,35 @@ const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 type base struct {
 	extractor.BaseExtractor
 	guestToken string // lazily populated
+	csrfToken  string // always set; from ct0 cookie or randomly generated
 }
 
 func newBase(rawURL string, params extractor.ClientParams) base {
-	return base{BaseExtractor: extractor.NewBase(rawURL, params)}
+	return base{
+		BaseExtractor: extractor.NewBase(rawURL, params),
+		csrfToken:     randomCSRFToken(),
+	}
+}
+
+// randomCSRFToken generates a random 32-char hex CSRF token for guest-mode
+// requests. Twitter requires x-csrf-token on all GraphQL calls, even
+// unauthenticated ones; gallery-dl does the same.
+func randomCSRFToken() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // ensureGuestToken fetches a guest token if one is not yet cached.
+// It is a no-op when authenticated cookies (auth_token) are already present.
 func (b *base) ensureGuestToken(ctx context.Context) error {
 	if b.guestToken != "" {
+		return nil
+	}
+
+	// If the cookie jar already has an auth_token for x.com/twitter.com,
+	// we are in authenticated mode and do not need a guest token.
+	if b.hasAuthToken() {
 		return nil
 	}
 
@@ -68,6 +90,23 @@ func (b *base) ensureGuestToken(ctx context.Context) error {
 		_ = b.Params.Cache.Set(ctx, guestTokenCacheKey, tok, guestTokenTTL)
 	}
 	return nil
+}
+
+// hasAuthToken reports whether the cookie jar contains an auth_token cookie
+// for x.com or twitter.com (indicating an authenticated session).
+func (b *base) hasAuthToken() bool {
+	if b.Params.Cookies == nil {
+		return false
+	}
+	for _, domain := range []string{"https://x.com/", "https://twitter.com/"} {
+		u, _ := url.Parse(domain)
+		for _, ck := range b.Params.Cookies.Cookies(u) {
+			if ck.Name == "auth_token" && ck.Value != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // fetchGuestToken activates a new guest token via the Twitter 1.1 API.
@@ -106,26 +145,41 @@ func (b *base) fetchGuestToken(ctx context.Context) (string, error) {
 // are added; otherwise guest-token mode is used.
 func (b *base) authHeaders() map[string]string {
 	h := map[string]string{
-		"Authorization":              "Bearer " + publicBearerToken,
-		"User-Agent":                 userAgent,
-		"Content-Type":               "application/json",
-		"x-twitter-client-language":  "en",
-		"x-twitter-active-user":      "yes",
+		"Accept":                    "*/*",
+		"Authorization":             "Bearer " + publicBearerToken,
+		"Content-Type":              "application/json",
+		"Referer":                   "https://x.com/",
+		"Sec-Fetch-Dest":            "empty",
+		"Sec-Fetch-Mode":            "cors",
+		"Sec-Fetch-Site":            "same-origin",
+		"User-Agent":                userAgent,
+		"x-twitter-active-user":     "yes",
+		"x-twitter-client-language": "en",
 	}
 	if b.guestToken != "" {
 		h["x-guest-token"] = b.guestToken
 	}
 
-	// Check for auth cookies from the jar.
+	// Start with the session CSRF token (random for guest mode).
+	csrfToken := b.csrfToken
+
+	// Override with ct0 cookie when authenticated.
 	if b.Params.Cookies != nil {
-		apiURL, _ := url.Parse("https://api.twitter.com/")
-		for _, ck := range b.Params.Cookies.Cookies(apiURL) {
-			if ck.Name == "ct0" {
-				h["x-csrf-token"] = ck.Value
-				h["x-twitter-auth-type"] = "OAuth2Session"
+		for _, domain := range []string{"https://x.com/", "https://twitter.com/"} {
+			u, _ := url.Parse(domain)
+			for _, ck := range b.Params.Cookies.Cookies(u) {
+				switch ck.Name {
+				case "ct0":
+					csrfToken = ck.Value
+					h["x-twitter-auth-type"] = "OAuth2Session"
+				}
 			}
 		}
 	}
+
+	// Always send x-csrf-token — Twitter silently returns {"data":{}}
+	// when this header is missing, even for unauthenticated GraphQL calls.
+	h["x-csrf-token"] = csrfToken
 	return h
 }
 

@@ -42,6 +42,7 @@ func run() int {
 	getJSON := flag.Bool("j", false, "print per-item JSON to stdout and exit")
 	getKeywords := flag.Bool("K", false, "print template keywords for first item and exit")
 	simulate := flag.Bool("simulate", false, "run full pipeline but skip network/filesystem I/O")
+	verbose := flag.Bool("verbose", false, "enable debug-level logging")
 	outputDir := flag.String("o", ".", "output directory")
 	filenameFormat := flag.String("f", "", "filename formatter pattern (overrides config)")
 	concurrency := flag.Int("concurrency", 4, "number of parallel downloads")
@@ -63,8 +64,12 @@ func run() int {
 	}
 
 	// ── Logger ────────────────────────────────────────────────────────────────
+	logLevel := slog.LevelInfo
+	if *verbose {
+		logLevel = slog.LevelDebug
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: logLevel,
 	}))
 
 	// ── Client options ────────────────────────────────────────────────────────

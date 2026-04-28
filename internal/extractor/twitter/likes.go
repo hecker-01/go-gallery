@@ -41,6 +41,10 @@ func (e *TwitterLikesExtractor) Items(ctx context.Context) <-chan extractor.Item
 
 		for item := range extractor.Paginate(ctx, func(ctx context.Context, cursor string) ([]extractor.Item, string, error) {
 			return e.fetchLikesPage(ctx, userID, cursor)
+		}, func(err error) {
+			if e.Params.Logger != nil {
+				e.Params.Logger.Error("fetch likes page failed", "screen_name", e.screenName, "error", err)
+			}
 		}) {
 			select {
 			case out <- item:
@@ -54,9 +58,9 @@ func (e *TwitterLikesExtractor) Items(ctx context.Context) <-chan extractor.Item
 
 func (e *TwitterLikesExtractor) resolveUserID(ctx context.Context, screenName string) (string, error) {
 	resp, err := e.graphQL(ctx, "UserByScreenName", map[string]any{
-		"screen_name":              screenName,
-		"withSafetyModeUserFields": true,
-	})
+		"screen_name":           screenName,
+		"withGrokTranslatedBio": false,
+	}, map[string]any{"withAuxiliaryUserLabels": true})
 	if err != nil {
 		return "", fmt.Errorf("resolve user %q: %w", screenName, err)
 	}

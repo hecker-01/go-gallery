@@ -38,6 +38,9 @@ func (e *TwitterUserExtractor) Items(ctx context.Context) <-chan extractor.Item 
 		// Resolve user ID from screen name.
 		userID, err := e.resolveUserID(ctx, e.screenName)
 		if err != nil {
+			if e.Params.Logger != nil {
+				e.Params.Logger.Error("failed to resolve user", "screen_name", e.screenName, "error", err)
+			}
 			return
 		}
 
@@ -55,6 +58,10 @@ func (e *TwitterUserExtractor) Items(ctx context.Context) <-chan extractor.Item 
 
 		for item := range extractor.Paginate(ctx, func(ctx context.Context, cursor string) ([]extractor.Item, string, error) {
 			return e.fetchUserPage(ctx, userID, operation, cursor)
+		}, func(err error) {
+			if e.Params.Logger != nil {
+				e.Params.Logger.Error("fetch page failed", "operation", operation, "error", err)
+			}
 		}) {
 			select {
 			case out <- item:
@@ -68,9 +75,9 @@ func (e *TwitterUserExtractor) Items(ctx context.Context) <-chan extractor.Item 
 
 func (e *TwitterUserExtractor) resolveUserID(ctx context.Context, screenName string) (string, error) {
 	resp, err := e.graphQL(ctx, "UserByScreenName", map[string]any{
-		"screen_name":                screenName,
-		"withSafetyModeUserFields":   true,
-	})
+		"screen_name":            screenName,
+		"withGrokTranslatedBio":  false,
+	}, map[string]any{"withAuxiliaryUserLabels": true})
 	if err != nil {
 		return "", fmt.Errorf("resolve user %q: %w", screenName, err)
 	}
@@ -80,21 +87,34 @@ func (e *TwitterUserExtractor) resolveUserID(ctx context.Context, screenName str
 func (e *TwitterUserExtractor) fetchUserPage(ctx context.Context, userID, operation, cursor string) ([]extractor.Item, string, error) {
 	vars := map[string]any{
 		"userId":                 userID,
-		"count":                  20,
+		"count":                  50,
 		"includePromotedContent": false,
-		"withQuickPromoteEligibilityTweetFields": true,
+		"withClientEventToken":   false,
+		"withBirdwatchNotes":     false,
 		"withVoice":              true,
-		"withV2Timeline":         true,
+	}
+	if operation == "UserTweets" {
+		vars["withQuickPromoteEligibilityTweetFields"] = false
 	}
 	if cursor != "" {
 		vars["cursor"] = cursor
 	}
 
-	resp, err := e.graphQL(ctx, operation, vars)
+	resp, err := e.graphQL(ctx, operation, vars, map[string]any{"withArticlePlainText": false})
 	if err != nil {
 		return nil, "", err
 	}
-	return parseTweetTimeline(resp)
+	items, cursor, err := parseTweetTimeline(resp)
+	if err != nil {
+		return nil, "", err
+	}
+	// Backfill screen name from URL when the API response omits it.
+	for i := range items {
+		if items[i].Meta != nil && items[i].Meta.Author.ScreenName == "" {
+			items[i].Meta.Author.ScreenName = e.screenName
+		}
+	}
+	return items, cursor, nil
 }
 
 // parseUserURL extracts screenName and mediaOnly from a twitter.com user URL.

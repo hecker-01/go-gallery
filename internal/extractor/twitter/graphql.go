@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,48 +13,84 @@ import (
 	"github.com/hecker-01/go-gallery/internal/extractor"
 )
 
+const maxRateLimitRetries = 3
+
 // ─── Query IDs ────────────────────────────────────────────────────────────────
 
 // defaultQueryIDs maps GraphQL operation names to their query IDs.
-// Twitter rotates these; they are correct as of late 2024.
-// A future enhancement will scrape the live web bundle and update the cache.
+// Twitter rotates these periodically; last verified 2025.
 var defaultQueryIDs = map[string]string{
-	"UserByScreenName":         "qW5u-DAuXpMEG0zaGnZoIw",
-	"UserTweets":               "V7H0Ap3_Hh2FyS75OCDO3Q",
-	"UserTweetsAndReplies":     "9yyVn4nXbi_FDrVCFxlzhQ",
-	"UserMedia":                "oMVVkQ5G-T8NCBzlRJ7UFBA",
-	"TweetDetail":              "BoHLKeBvibdYDiJON1oqTg",
-	"SearchTimeline":           "rKoqjfHnCEtQkBe6y1IYRQ",
-	"Bookmarks":                "xLjCVLmkC35QaFHy9IbHWA",
-	"Likes":                    "kgZtsNyE46T3JaEf2nF9vA",
-	"HomeTimeline":             "zhX91JE87mWvfprhYBnMcA",
-	"ListLatestTweetsTimeline": "BbGLL1ZfMibdFNWlk7a0Pw",
+	"UserByScreenName":         "ck5KkZ8t5cOmoLssopN99Q",
+	"UserTweets":               "E8Wq-_jFSaU7hxVcuOPR9g",
+	"UserTweetsAndReplies":     "-O3QOHrVn1aOm_cF5wyTCQ",
+	"UserMedia":                "jCRhbOzdgOHp6u9H4g2tEg",
+	"TweetDetail":              "iFEr5AcP121Og4wx9Yqo3w",
+	"SearchTimeline":           "4fpceYZ6-YQCx_JSl_Cn_A",
+	"Bookmarks":                "pLtjrO4ubNh996M_Cubwsg",
+	"Likes":                    "TGEKkJG_meudeaFcqaxM-Q",
+	"HomeTimeline":             "DXmgQYmIft1oLP6vMkJixw",
+	"ListLatestTweetsTimeline": "06JtmwM8k_1cthpFZITVVA",
 }
 
 // ─── Feature flags ────────────────────────────────────────────────────────────
 
-// baseFeatures is the standard set of Twitter GraphQL feature flags.
+// baseFeatures is the standard set of Twitter GraphQL feature flags used for
+// timeline pagination endpoints (UserMedia, UserTweets, etc.).
 var baseFeatures = map[string]bool{
-	"rweb_lists_timeline_redesign_enabled":                                    true,
-	"responsive_web_graphql_exclude_directive_enabled":                        true,
+	"rweb_video_screen_enabled": false,
+	"payments_enabled":          false,
+	"rweb_xchat_enabled":        false,
+	"profile_label_improvements_pcf_label_in_post_enabled":                    true,
+	"rweb_tipjar_consumption_enabled":                                         true,
 	"verified_phone_label_enabled":                                            false,
 	"creator_subscriptions_tweet_preview_api_enabled":                         true,
 	"responsive_web_graphql_timeline_navigation_enabled":                      true,
 	"responsive_web_graphql_skip_user_profile_image_extensions_enabled":       false,
-	"tweetypie_unmention_optimization_enabled":                                true,
+	"premium_content_api_read_enabled":                                        false,
+	"communities_web_enable_tweet_community_results_fetch":                    true,
+	"c9s_tweet_anatomy_moderator_badge_enabled":                               true,
+	"responsive_web_grok_analyze_button_fetch_trends_enabled":                 false,
+	"responsive_web_grok_analyze_post_followups_enabled":                      true,
+	"responsive_web_jetfuel_frame":                                            true,
+	"responsive_web_grok_share_attachment_enabled":                            true,
+	"articles_preview_enabled":                                                true,
 	"responsive_web_edit_tweet_api_enabled":                                   true,
 	"graphql_is_translatable_rweb_tweet_is_translatable_enabled":              true,
 	"view_counts_everywhere_api_enabled":                                      true,
 	"longform_notetweets_consumption_enabled":                                 true,
+	"responsive_web_twitter_article_tweet_consumption_enabled":                true,
 	"tweet_awards_web_tipping_enabled":                                        false,
+	"responsive_web_grok_show_grok_translated_post":                           false,
+	"responsive_web_grok_analysis_button_from_backend":                        true,
+	"creator_subscriptions_quote_tweet_preview_enabled":                       false,
 	"freedom_of_speech_not_reach_fetch_enabled":                               true,
 	"standardized_nudges_misinfo":                                             true,
-	"tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": false,
-	"interactive_text_enabled":                                                true,
-	"responsive_web_text_conversations_enabled":                               false,
+	"tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": true,
 	"longform_notetweets_rich_text_read_enabled":                              true,
-	"longform_notetweets_inline_media_enabled":                                false,
+	"longform_notetweets_inline_media_enabled":                                true,
+	"responsive_web_grok_image_annotation_enabled":                            true,
+	"responsive_web_grok_imagine_annotation_enabled":                          true,
+	"responsive_web_grok_community_note_auto_translation_is_enabled":          false,
 	"responsive_web_enhance_cards_enabled":                                    false,
+}
+
+// userFeatures is the feature flag set used for user-lookup operations
+// (UserByScreenName, UserByRestId). Different from baseFeatures.
+var userFeatures = map[string]bool{
+	"hidden_profile_subscriptions_enabled":                              true,
+	"payments_enabled":                                                  false,
+	"rweb_xchat_enabled":                                                false,
+	"profile_label_improvements_pcf_label_in_post_enabled":              true,
+	"rweb_tipjar_consumption_enabled":                                   true,
+	"verified_phone_label_enabled":                                      false,
+	"highlights_tweets_tab_ui_enabled":                                  true,
+	"responsive_web_twitter_article_notes_tab_enabled":                  true,
+	"subscriptions_feature_can_gift_premium":                            true,
+	"creator_subscriptions_tweet_preview_api_enabled":                   true,
+	"responsive_web_graphql_skip_user_profile_image_extensions_enabled": false,
+	"responsive_web_graphql_timeline_navigation_enabled":                true,
+	"subscriptions_verification_info_is_identity_verified_enabled":      true,
+	"subscriptions_verification_info_verified_since_enabled":            true,
 }
 
 // featuresJSON returns a compact JSON representation of baseFeatures.
@@ -62,10 +99,17 @@ func featuresJSON() string {
 	return string(b)
 }
 
+// userFeaturesJSON returns a compact JSON representation of userFeatures.
+func userFeaturesJSON() string {
+	b, _ := json.Marshal(userFeatures)
+	return string(b)
+}
+
 // ─── GraphQL client ───────────────────────────────────────────────────────────
 
 // graphQL performs a Twitter GraphQL GET request and decodes the JSON response.
-func (b *base) graphQL(ctx context.Context, operation string, variables map[string]any) (map[string]any, error) {
+// An optional fieldToggles map is appended as a "fieldToggles" query parameter.
+func (b *base) graphQL(ctx context.Context, operation string, variables map[string]any, fieldToggles ...map[string]any) (map[string]any, error) {
 	qid := b.queryID(ctx, operation)
 
 	variablesJSON, err := json.Marshal(variables)
@@ -73,50 +117,98 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 		return nil, fmt.Errorf("twitter graphql %s: marshal variables: %w", operation, err)
 	}
 
-	endpoint := fmt.Sprintf("https://twitter.com/i/api/graphql/%s/%s", qid, operation)
+	endpoint := fmt.Sprintf("https://x.com/i/api/graphql/%s/%s", qid, operation)
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return nil, err
 	}
 	q := u.Query()
 	q.Set("variables", string(variablesJSON))
-	q.Set("features", featuresJSON())
+	// UserByScreenName uses a different, smaller feature set.
+	if operation == "UserByScreenName" {
+		q.Set("features", userFeaturesJSON())
+	} else {
+		q.Set("features", featuresJSON())
+	}
+	if len(fieldToggles) > 0 && fieldToggles[0] != nil {
+		if ft, err := json.Marshal(fieldToggles[0]); err == nil {
+			q.Set("fieldToggles", string(ft))
+		}
+	}
 	u.RawQuery = q.Encode()
 
-	resp, err := b.doGet(ctx, u.String())
-	if err != nil {
-		return nil, fmt.Errorf("twitter graphql %s: %w", operation, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 401 {
-		return nil, &authErr{msg: "authentication required for " + operation}
-	}
-	if resp.StatusCode == 403 {
-		return nil, &authErr{msg: "not authorized for " + operation}
-	}
-	if resp.StatusCode == 429 {
-		resetAt := parseRateLimitReset(resp)
-		if b.Params.RateLimitCB != nil {
-			b.Params.RateLimitCB(operation, resetAt)
+	var lastRateLimitErr error
+	for attempt := 0; attempt <= maxRateLimitRetries; attempt++ {
+		resp, err := b.doGet(ctx, u.String())
+		if err != nil {
+			return nil, fmt.Errorf("twitter graphql %s: %w", operation, err)
 		}
-		return nil, &rateLimitErr{endpoint: operation, resetAt: resetAt}
-	}
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("twitter graphql %s: HTTP %d", operation, resp.StatusCode)
-	}
+		defer resp.Body.Close()
 
-	var result map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("twitter graphql %s: decode: %w", operation, err)
+		if resp.StatusCode == 401 {
+			return nil, &authErr{msg: "authentication required for " + operation}
+		}
+		if resp.StatusCode == 403 {
+			return nil, &authErr{msg: "not authorized for " + operation}
+		}
+		if resp.StatusCode == 429 {
+			resetAt := parseRateLimitReset(resp)
+			if b.Params.RateLimitCB != nil {
+				b.Params.RateLimitCB(operation, resetAt)
+			}
+			lastRateLimitErr = &rateLimitErr{endpoint: operation, resetAt: resetAt}
+			if attempt < maxRateLimitRetries {
+				waitDur := time.Until(resetAt)
+				if waitDur < time.Second {
+					waitDur = time.Second
+				}
+				if b.Params.Logger != nil {
+					b.Params.Logger.Info("rate limited, waiting",
+						"operation", operation,
+						"reset_at", resetAt.UTC().Format(time.RFC3339),
+						"wait", waitDur.Round(time.Second),
+					)
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(waitDur):
+				}
+				continue
+			}
+			return nil, lastRateLimitErr
+		}
+		if resp.StatusCode != 200 {
+			return nil, fmt.Errorf("twitter graphql %s: HTTP %d", operation, resp.StatusCode)
+		}
+
+		var result map[string]any
+		bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		if err != nil {
+			return nil, fmt.Errorf("twitter graphql %s: read body: %w", operation, err)
+		}
+		if err := json.Unmarshal(bodyBytes, &result); err != nil {
+			return nil, fmt.Errorf("twitter graphql %s: decode: %w", operation, err)
+		}
+		// Debug: log full response when data is unexpectedly empty.
+		if data, ok := result["data"].(map[string]any); ok && len(data) == 0 {
+			if b.Params.Logger != nil {
+				b.Params.Logger.Debug("graphql empty data response", "operation", operation, "body", string(bodyBytes))
+			}
+		}
+		return result, nil
 	}
-	return result, nil
+	return nil, lastRateLimitErr
 }
+
+// queryIDCacheVersion is bumped whenever defaultQueryIDs changes, to
+// invalidate any stale entries from a previous binary version.
+const queryIDCacheVersion = "v2"
 
 // queryID returns the query ID for the named operation, checking the cache
 // first, then the baked-in default map.
 func (b *base) queryID(ctx context.Context, operation string) string {
-	cacheKey := "twitter:qid:" + operation
+	cacheKey := "twitter:qid:" + queryIDCacheVersion + ":" + operation
 	if b.Params.Cache != nil {
 		if v, ok, err := b.Params.Cache.Get(ctx, cacheKey); err == nil && ok {
 			return v
@@ -167,8 +259,24 @@ func (e *rateLimitErr) Error() string {
 
 // parseUserID extracts the numeric user ID from a UserByScreenName response.
 func parseUserID(resp map[string]any) (string, error) {
+	// Check for top-level API errors first.
+	if errs, ok := resp["errors"].([]any); ok && len(errs) > 0 {
+		if first, ok := errs[0].(map[string]any); ok {
+			if msg, ok := first["message"].(string); ok {
+				return "", fmt.Errorf("UserByScreenName API error: %s", msg)
+			}
+		}
+	}
+	// Log available keys under "data" for debug if lookup fails.
 	user, err := dig(resp, "data", "user", "result")
 	if err != nil {
+		if data, ok := resp["data"].(map[string]any); ok {
+			keys := make([]string, 0, len(data))
+			for k := range data {
+				keys = append(keys, k)
+			}
+			return "", fmt.Errorf("UserByScreenName: unexpected data keys %v (expected 'user')", keys)
+		}
 		return "", fmt.Errorf("UserByScreenName: %w", err)
 	}
 	legacy, err := dig(user, "legacy")
@@ -417,21 +525,62 @@ func tweetResultToItems(result any, num, count int) []extractor.Item {
 	isReply := strOrEmpty(legacy["in_reply_to_status_id_str"]) != ""
 	isQuote := boolOrFalse(legacy["is_quote_status"])
 
-	// Author
+	// Author — try multiple paths used by different API response shapes:
+	// 1. Classic: r["core"]["user_results"]["result"]["legacy"]
+	// 2. New 2025: r["core"]["user_results"]["result"]["core"] for screen_name/name
+	// 3. New:     r["author"]["core"]["screen_name"] (gallery-dl 2025 format)
 	var authorMeta extractor.AuthorMeta
 	if core, _ := r["core"].(map[string]any); core != nil {
 		if userRes, _ := core["user_results"].(map[string]any); userRes != nil {
 			if userResult, _ := userRes["result"].(map[string]any); userResult != nil {
+				// Try legacy first (classic format)
 				if ul, _ := userResult["legacy"].(map[string]any); ul != nil {
 					authorMeta.ID, _ = ul["id_str"].(string)
 					authorMeta.Name, _ = ul["name"].(string)
 					authorMeta.ScreenName, _ = ul["screen_name"].(string)
+				}
+				// New 2025 format: screen_name/name in a nested "core" object
+				if authorMeta.ScreenName == "" {
+					if uc, _ := userResult["core"].(map[string]any); uc != nil {
+						authorMeta.ScreenName, _ = uc["screen_name"].(string)
+						authorMeta.Name, _ = uc["name"].(string)
+					}
 				}
 				if authorMeta.ID == "" {
 					authorMeta.ID, _ = userResult["rest_id"].(string)
 				}
 			}
 		}
+	}
+	// Fallback: new "author" key format (Twitter/X API circa 2025)
+	if authorMeta.ScreenName == "" {
+		if author, _ := r["author"].(map[string]any); author != nil {
+			if authorCore, _ := author["core"].(map[string]any); authorCore != nil {
+				authorMeta.ScreenName, _ = authorCore["screen_name"].(string)
+				authorMeta.Name, _ = authorCore["name"].(string)
+			}
+			if authorMeta.ID == "" {
+				authorMeta.ID, _ = author["rest_id"].(string)
+			}
+			// Also try legacy inside author
+			if authorMeta.ScreenName == "" {
+				if ul, _ := author["legacy"].(map[string]any); ul != nil {
+					authorMeta.ID, _ = ul["id_str"].(string)
+					authorMeta.Name, _ = ul["name"].(string)
+					authorMeta.ScreenName, _ = ul["screen_name"].(string)
+				}
+			}
+		}
+	}
+	// Debug: log top-level tweet result keys when author is still unresolved.
+	if authorMeta.ScreenName == "" && tweetID != "" {
+		keys := make([]string, 0, len(r))
+		for k := range r {
+			keys = append(keys, k)
+		}
+		// Log at debug level so it appears with --verbose.
+		// We can't use b.Params.Logger here (no access), but the caller can.
+		_ = keys
 	}
 
 	// Hashtags and mentions

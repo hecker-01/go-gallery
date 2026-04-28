@@ -45,7 +45,7 @@ func CookiesFromFile(path string) (http.CookieJar, error) {
 			expires = time.Unix(exp, 0)
 		}
 		name := fields[5]
-		value := fields[6]
+		value := strings.Trim(fields[6], "\"")
 
 		// Determine the scheme from the secure flag.
 		scheme := "http"
@@ -102,4 +102,3 @@ func CookiesFromBrowser(browserName string) (http.CookieJar, error) {
 		}
 	}
 }
-
