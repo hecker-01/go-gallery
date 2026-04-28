@@ -236,6 +236,10 @@ func (r Range) String() string { return r.raw }
 // DownloadConfig holds the resolved configuration for a single Download call.
 type DownloadConfig struct {
 	OutputDir      string
+	// FlatDir, when true, strips any directory components from the formatted
+	// filename so files land directly in OutputDir with no subdirectories.
+	// Equivalent to gallery-dl's -D flag.
+	FlatDir        bool
 	FilenameFormat string
 	Filter         Filter
 	PostProcessors []PostProcessor
@@ -250,9 +254,27 @@ type DownloadConfig struct {
 // DownloadOption mutates a DownloadConfig.
 type DownloadOption func(*DownloadConfig)
 
-// WithOutputDir sets the base output directory.
+// WithOutputDir sets the base output directory. The filename format's
+// directory components (e.g. {category}/{author.screen_name}/) are still
+// created beneath it. Equivalent to gallery-dl's -d flag.
 func WithOutputDir(dir string) DownloadOption {
 	return func(c *DownloadConfig) { c.OutputDir = dir }
+}
+
+// WithFlatDir disables subdirectory creation — files are placed directly in
+// OutputDir regardless of the filename format's directory components.
+// Equivalent to gallery-dl's -D flag.
+func WithFlatDir() DownloadOption {
+	return func(c *DownloadConfig) { c.FlatDir = true }
+}
+
+// WithDirectOutputDir sets an exact output directory with no subdirectory
+// structure. Equivalent to combining WithOutputDir and WithFlatDir.
+func WithDirectOutputDir(dir string) DownloadOption {
+	return func(c *DownloadConfig) {
+		c.OutputDir = dir
+		c.FlatDir = true
+	}
 }
 
 // WithFilenameFormat overrides the filename formatter pattern.

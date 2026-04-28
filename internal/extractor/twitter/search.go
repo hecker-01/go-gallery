@@ -2,6 +2,7 @@ package twitter
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 
 	"github.com/hecker-01/go-gallery/internal/extractor"
@@ -38,7 +39,7 @@ func (e *TwitterSearchExtractor) Items(ctx context.Context) <-chan extractor.Ite
 			return e.fetchSearchPage(ctx, cursor)
 		}, func(err error) {
 			if e.Params.Logger != nil {
-				e.Params.Logger.Error("fetch search page failed", "query", e.query, "error", err)
+				e.Params.Logger.Error(fmt.Sprintf("fetch search page failed for %q: %v", e.query, err))
 			}
 		}) {
 			select {

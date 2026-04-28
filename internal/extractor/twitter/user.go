@@ -39,7 +39,7 @@ func (e *TwitterUserExtractor) Items(ctx context.Context) <-chan extractor.Item 
 		userID, err := e.resolveUserID(ctx, e.screenName)
 		if err != nil {
 			if e.Params.Logger != nil {
-				e.Params.Logger.Error("failed to resolve user", "screen_name", e.screenName, "error", err)
+				e.Params.Logger.Error(fmt.Sprintf("failed to resolve user %q: %v", e.screenName, err))
 			}
 			return
 		}
@@ -60,7 +60,7 @@ func (e *TwitterUserExtractor) Items(ctx context.Context) <-chan extractor.Item 
 			return e.fetchUserPage(ctx, userID, operation, cursor)
 		}, func(err error) {
 			if e.Params.Logger != nil {
-				e.Params.Logger.Error("fetch page failed", "operation", operation, "error", err)
+				e.Params.Logger.Error(fmt.Sprintf("fetch %s page failed: %v", operation, err))
 			}
 		}) {
 			select {

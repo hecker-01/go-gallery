@@ -50,7 +50,7 @@ func (e *TwitterTweetExtractor) Items(ctx context.Context) <-chan extractor.Item
 		})
 		if err != nil {
 			if e.Params.Logger != nil {
-				e.Params.Logger.Error("TweetDetail failed", "tweet_id", e.tweetID, "error", err)
+				e.Params.Logger.Error(fmt.Sprintf("TweetDetail failed for %s: %v", e.tweetID, err))
 			}
 			return
 		}
@@ -58,7 +58,7 @@ func (e *TwitterTweetExtractor) Items(ctx context.Context) <-chan extractor.Item
 		items, err := parseTweetDetail(resp)
 		if err != nil {
 			if e.Params.Logger != nil {
-				e.Params.Logger.Error("parseTweetDetail failed", "tweet_id", e.tweetID, "error", err)
+				e.Params.Logger.Error(fmt.Sprintf("failed to parse TweetDetail for %s: %v", e.tweetID, err))
 			}
 			return
 		}

@@ -10,13 +10,16 @@
 //	-j                    Print per-item JSON and exit (GetJSON mode)
 //	-K                    Print template keywords for first item and exit
 //	-simulate             Run extraction and filtering but skip all I/O
-//	-o DIR                Output directory (default: current directory)
+//	-d DIR                Base output directory (default: current directory); {category}/{username}/… structure is created beneath it
+//	-D DIR                Direct output directory; files are placed here with no subdirectory structure
 //	-f PATTERN            Filename formatter pattern
 //	--concurrency N       Number of parallel downloads (default: 4)
 //	--cookies-from-browser BROWSER  Import cookies from browser profile (firefox)
 //	--cookies-from-file PATH        Import cookies from Netscape cookies.txt
 //	--filter EXPR         Expression filter (github.com/expr-lang/expr syntax)
 //	--config PATH         Path to YAML/TOML/JSON config file
+//	-v / --verbose        Enable debug-level logging
+//	-q / --quiet          Suppress all output
 package main
 
 import (
@@ -42,8 +45,13 @@ func run() int {
 	getJSON := flag.Bool("j", false, "print per-item JSON to stdout and exit")
 	getKeywords := flag.Bool("K", false, "print template keywords for first item and exit")
 	simulate := flag.Bool("simulate", false, "run full pipeline but skip network/filesystem I/O")
-	verbose := flag.Bool("verbose", false, "enable debug-level logging")
-	outputDir := flag.String("o", ".", "output directory")
+	var isVerbose, isQuiet bool
+	flag.BoolVar(&isVerbose, "v", false, "enable debug-level logging")
+	flag.BoolVar(&isVerbose, "verbose", false, "enable debug-level logging")
+	flag.BoolVar(&isQuiet, "q", false, "suppress all output")
+	flag.BoolVar(&isQuiet, "quiet", false, "suppress all output")
+	baseDir := flag.String("d", ".", "base output directory; {category}/{username}/… structure is created beneath it")
+	directDir := flag.String("D", "", "direct output directory; files are placed here with no subdirectory structure")
 	filenameFormat := flag.String("f", "", "filename formatter pattern (overrides config)")
 	concurrency := flag.Int("concurrency", 4, "number of parallel downloads")
 	cookiesBrowser := flag.String("cookies-from-browser", "", "import cookies from browser profile (firefox)")
@@ -65,12 +73,13 @@ func run() int {
 
 	// ── Logger ────────────────────────────────────────────────────────────────
 	logLevel := slog.LevelInfo
-	if *verbose {
+	switch {
+	case isQuiet:
+		logLevel = levelQuiet
+	case isVerbose:
 		logLevel = slog.LevelDebug
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: logLevel,
-	}))
+	logger := slog.New(newGalleryHandler(os.Stderr, logLevel))
 
 	// ── Client options ────────────────────────────────────────────────────────
 	opts := []gallery.Option{
@@ -81,7 +90,7 @@ func run() int {
 	if *configPath != "" {
 		cfg, err := gallery.LoadConfig(*configPath)
 		if err != nil {
-			logger.Error("failed to load config", "path", *configPath, "error", err)
+			logger.Error(fmt.Sprintf("failed to load config %s: %v", *configPath, err))
 			return 1
 		}
 		opts = append(opts, gallery.WithConfig(cfg))
@@ -89,8 +98,7 @@ func run() int {
 
 	if *cookiesBrowser != "" {
 		if *cookiesBrowser != "firefox" {
-			logger.Error("unsupported browser for cookie extraction; only 'firefox' is supported",
-				"browser", *cookiesBrowser)
+			logger.Error(fmt.Sprintf("unsupported browser %q; only 'firefox' is supported", *cookiesBrowser))
 			return 1
 		}
 		opts = append(opts, gallery.WithCookiesFromBrowser(*cookiesBrowser))
@@ -104,7 +112,7 @@ func run() int {
 	if *filterExpr != "" {
 		ef, err := gallery.NewExprFilter(*filterExpr)
 		if err != nil {
-			logger.Error("invalid filter expression", "expr", *filterExpr, "error", err)
+			logger.Error(fmt.Sprintf("invalid filter expression %q: %v", *filterExpr, err))
 			return 1
 		}
 		filter = ef
@@ -112,8 +120,13 @@ func run() int {
 
 	// ── Download options ──────────────────────────────────────────────────────
 	dlOpts := []gallery.DownloadOption{
-		gallery.WithOutputDir(*outputDir),
 		gallery.WithSimulate(*simulate),
+	}
+	// -D takes precedence over -d (mirrors gallery-dl behaviour).
+	if *directDir != "" {
+		dlOpts = append(dlOpts, gallery.WithDirectOutputDir(*directDir))
+	} else {
+		dlOpts = append(dlOpts, gallery.WithOutputDir(*baseDir))
 	}
 	if *filenameFormat != "" {
 		dlOpts = append(dlOpts, gallery.WithFilenameFormat(*filenameFormat))
@@ -135,25 +148,25 @@ func run() int {
 		switch {
 		case *getURLs:
 			if err := runGetURLs(ctx, client, rawURL, logger); err != nil {
-				logger.Error("GetURLs failed", "url", rawURL, "error", err)
+				logger.Error(fmt.Sprintf("%v", err))
 				exitCode = 1
 			}
 
 		case *getKeywords:
 			if err := runGetKeywords(ctx, client, rawURL, logger); err != nil {
-				logger.Error("GetKeywords failed", "url", rawURL, "error", err)
+				logger.Error(fmt.Sprintf("%v", err))
 				exitCode = 1
 			}
 
 		case *getJSON:
 			if err := runGetJSON(ctx, client, rawURL, logger); err != nil {
-				logger.Error("GetJSON failed", "url", rawURL, "error", err)
+				logger.Error(fmt.Sprintf("%v", err))
 				exitCode = 1
 			}
 
 		default:
 			if err := runDownload(ctx, client, rawURL, dlOpts, logger); err != nil {
-				logger.Error("Download failed", "url", rawURL, "error", err)
+				logger.Error(fmt.Sprintf("%v", err))
 				exitCode = 1
 			}
 		}
@@ -184,7 +197,7 @@ func runGetJSON(ctx context.Context, client *gallery.Client, rawURL string, logg
 	enc := json.NewEncoder(os.Stdout)
 	for msg := range msgs {
 		if err := enc.Encode(msg); err != nil {
-			logger.Warn("JSON encode error", "error", err)
+			logger.Warn(fmt.Sprintf("JSON encode error: %v", err))
 		}
 	}
 	return <-errs
@@ -192,16 +205,10 @@ func runGetJSON(ctx context.Context, client *gallery.Client, rawURL string, logg
 
 func runDownload(ctx context.Context, client *gallery.Client, rawURL string, opts []gallery.DownloadOption, logger *slog.Logger) error {
 	result, err := client.Download(ctx, rawURL, opts...)
-	logger.Info("download complete",
-		"total", result.TotalFiles,
-		"skipped", result.SkippedFiles,
-		"failed", result.FailedFiles,
-		"duration", result.Duration,
-	)
-	if len(result.Errors) > 0 {
-		for _, e := range result.Errors {
-			logger.Warn("download error", "error", e)
-		}
+	logger.Info(fmt.Sprintf("%d downloaded, %d skipped, %d failed (%s)",
+		result.TotalFiles, result.SkippedFiles, result.FailedFiles, result.Duration))
+	for _, e := range result.Errors {
+		logger.Warn(fmt.Sprintf("%v", e))
 	}
 	return err
 }

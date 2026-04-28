@@ -2,6 +2,7 @@ package twitter
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/hecker-01/go-gallery/internal/extractor"
 )
@@ -31,7 +32,7 @@ func (e *TwitterTimelineExtractor) Items(ctx context.Context) <-chan extractor.I
 			return e.fetchTimelinePage(ctx, cursor)
 		}, func(err error) {
 			if e.Params.Logger != nil {
-				e.Params.Logger.Error("fetch home timeline page failed", "error", err)
+				e.Params.Logger.Error(fmt.Sprintf("fetch home timeline page failed: %v", err))
 			}
 		}) {
 			select {

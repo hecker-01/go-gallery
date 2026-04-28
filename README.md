@@ -38,19 +38,34 @@ go-gallery [flags] URL...
 
 ### Flags
 
-| Flag                             | Default  | Description                                          |
-| -------------------------------- | -------- | ---------------------------------------------------- |
-| `-g`                             |          | Print direct media URLs and exit (no download)       |
-| `-j`                             |          | Print per-item JSON to stdout and exit               |
-| `-K`                             |          | Print available template keywords for the first item |
-| `-simulate`                      |          | Run full pipeline but skip all I/O                   |
-| `-o DIR`                         | `.`      | Output directory                                     |
-| `-f PATTERN`                     | (config) | Filename template pattern                            |
-| `--concurrency N`                | `4`      | Number of parallel downloads                         |
-| `--cookies-from-browser BROWSER` |          | Import cookies from browser (`firefox`)              |
-| `--cookies-from-file PATH`       |          | Import from Netscape `cookies.txt` file              |
-| `--filter EXPR`                  |          | `expr-lang` expression to filter items               |
-| `--config PATH`                  |          | Path to a YAML/TOML/JSON config file                 |
+| Flag                             | Default  | Description                                                                               |
+| -------------------------------- | -------- | ----------------------------------------------------------------------------------------- |
+| `-g`                             |          | Print direct media URLs and exit (no download)                                            |
+| `-j`                             |          | Print per-item JSON to stdout and exit                                                    |
+| `-K`                             |          | Print available template keywords for the first item                                      |
+| `-simulate`                      |          | Run full pipeline but skip all I/O                                                        |
+| `-d DIR`                         | `.`      | Base output directory; `twitter/{username}/…` structure is created beneath it             |
+| `-D DIR`                         |          | Direct output directory; files are placed here with no subdirectory structure             |
+| `-f PATTERN`                     | (config) | Filename template pattern                                                                 |
+| `--concurrency N`                | `4`      | Number of parallel downloads                                                              |
+| `--cookies-from-browser BROWSER` |          | Import cookies from browser (`firefox`)                                                   |
+| `--cookies-from-file PATH`       |          | Import from Netscape `cookies.txt` file                                                   |
+| `--filter EXPR`                  |          | `expr-lang` expression to filter items                                                    |
+| `--config PATH`                  |          | Path to a YAML/TOML/JSON config file                                                      |
+| `-v` / `--verbose`               |          | Enable debug-level logging                                                                |
+| `-q` / `--quiet`                 |          | Suppress all output                                                                       |
+
+**Output format** follows gallery-dl's style — `[source][level] message` with ANSI colors on terminals (auto-detected; set `NO_COLOR=1` to disable):
+
+```
+[twitter][info] twitter/username/1234567890_1.jpg
+[twitter][warning] rate limited on UserMedia; waiting 15s (resets at 2026-01-01T12:00:00Z)
+[go-gallery][info] 42 downloaded, 0 skipped, 0 failed (8.3s)
+```
+
+> **`-d` vs `-D`** mirrors the convention from [gallery-dl](https://github.com/mikf/gallery-dl):
+> `-d` sets the *base* directory and the tool still creates `twitter/{username}/` beneath it;
+> `-D` sets the *direct* directory and files go there with no further subdirectories.
 
 ### Examples
 
@@ -64,8 +79,14 @@ go-gallery https://x.com/username/status/1234567890
 # Download bookmarks (requires authentication)
 go-gallery --cookies-from-browser firefox https://x.com/i/bookmarks
 
-# Custom output directory and filename pattern
-go-gallery -o ~/gallery \
+# Download to ~/gallery, keeping twitter/username/ subfolders
+go-gallery -d ~/gallery https://x.com/username/media
+
+# Download flat — all files directly into ~/flat, no subfolders
+go-gallery -D ~/flat https://x.com/username/media
+
+# Custom base directory and filename pattern
+go-gallery -d ~/gallery \
   -f "{author.screen_name}/{date:2006-01}/{tweet_id}_{num}.{extension}" \
   https://x.com/username/media
 
@@ -177,12 +198,23 @@ Templates use `{key}` placeholders. Available keywords:
 ```go
 import "github.com/hecker-01/go-gallery"
 
-client := gallery.NewClient(
-    gallery.WithConcurrency(4),
+client := gallery.NewClient(gallery.WithConcurrency(4))
+
+// Base directory — twitter/username/ structure is created beneath ./output
+result, err := client.Download(ctx, "https://x.com/username/media",
     gallery.WithOutputDir("./output"),
 )
 
-results, err := client.Download(ctx, "https://x.com/username/media")
+// Direct directory — files go straight into ./flat with no subdirectories
+result, err = client.Download(ctx, "https://x.com/username/media",
+    gallery.WithDirectOutputDir("./flat"),
+)
+
+// Or compose manually: set base dir then enable flat mode
+result, err = client.Download(ctx, "https://x.com/username/media",
+    gallery.WithOutputDir("./flat"),
+    gallery.WithFlatDir(),
+)
 ```
 
 ## Development
