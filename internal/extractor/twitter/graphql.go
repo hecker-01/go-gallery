@@ -163,11 +163,8 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 					waitDur = time.Second
 				}
 				if b.Params.Logger != nil {
-					b.Params.Logger.Info("rate limited, waiting",
-						"operation", operation,
-						"reset_at", resetAt.UTC().Format(time.RFC3339),
-						"wait", waitDur.Round(time.Second),
-					)
+					b.Params.Logger.Info(fmt.Sprintf("rate limited on %s; waiting %s (resets at %s)",
+						operation, waitDur.Round(time.Second), resetAt.UTC().Format(time.RFC3339)))
 				}
 				select {
 				case <-ctx.Done():
@@ -193,7 +190,7 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 		// Debug: log full response when data is unexpectedly empty.
 		if data, ok := result["data"].(map[string]any); ok && len(data) == 0 {
 			if b.Params.Logger != nil {
-				b.Params.Logger.Debug("graphql empty data response", "operation", operation, "body", string(bodyBytes))
+				b.Params.Logger.Debug(fmt.Sprintf("graphql empty data response for %s: %s", operation, string(bodyBytes)))
 			}
 		}
 		return result, nil

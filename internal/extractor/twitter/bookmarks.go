@@ -2,6 +2,7 @@ package twitter
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/hecker-01/go-gallery/internal/extractor"
 )
@@ -31,7 +32,7 @@ func (e *TwitterBookmarksExtractor) Items(ctx context.Context) <-chan extractor.
 			return e.fetchBookmarksPage(ctx, cursor)
 		}, func(err error) {
 			if e.Params.Logger != nil {
-				e.Params.Logger.Error("fetch bookmarks page failed", "error", err)
+				e.Params.Logger.Error(fmt.Sprintf("fetch bookmarks page failed: %v", err))
 			}
 		}) {
 			select {

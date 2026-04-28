@@ -44,6 +44,9 @@ type base struct {
 }
 
 func newBase(rawURL string, params extractor.ClientParams) base {
+	if params.Logger != nil {
+		params.Logger = params.Logger.With("source", "twitter")
+	}
 	return base{
 		BaseExtractor: extractor.NewBase(rawURL, params),
 		csrfToken:     randomCSRFToken(),

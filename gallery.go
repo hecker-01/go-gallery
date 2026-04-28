@@ -5,6 +5,7 @@ package gallery
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -115,8 +116,7 @@ func WithCookiesFromBrowser(browser string) Option {
 	return func(c *Client) {
 		jar, err := CookiesFromBrowser(browser)
 		if err != nil {
-			c.logger.Warn("could not extract browser cookies",
-				"browser", browser, "error", err)
+			c.logger.Warn(fmt.Sprintf("could not extract browser cookies from %s: %v", browser, err))
 			return
 		}
 		c.jar = jar
@@ -129,8 +129,7 @@ func WithCookiesFromFile(path string) Option {
 	return func(c *Client) {
 		jar, err := CookiesFromFile(path)
 		if err != nil {
-			c.logger.Warn("could not load cookies from file",
-				"path", path, "error", err)
+			c.logger.Warn(fmt.Sprintf("could not load cookies from %s: %v", path, err))
 			return
 		}
 		c.jar = jar
@@ -350,11 +349,7 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 		mu.Unlock()
 
 		if cfg.Simulate {
-			c.logger.Info("simulate download",
-				"url", info.MediaURL,
-				"tweet_id", info.TweetID,
-				"num", info.Num,
-			)
+			c.logger.Info("[simulate] " + info.MediaURL)
 			continue
 		}
 
@@ -377,6 +372,9 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 			name := fname.Format(kw)
 			if name == "" || name == "." {
 				name = mi.TweetID + "_" + strconv.Itoa(mi.Num) + "." + mi.Extension
+			}
+			if cfg.FlatDir {
+				name = filepath.Base(name)
 			}
 
 			destPath := filepath.Join(cfg.OutputDir, name)
@@ -419,11 +417,7 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 				_ = c.archive.Put(ctx, mi.TweetID+":"+strconv.Itoa(mi.Num))
 			}
 
-			c.logger.Info("downloaded",
-				"path", destPath,
-				"tweet_id", mi.TweetID,
-				"num", mi.Num,
-			)
+			c.logger.Info(destPath)
 		}(info, media.URL)
 	}
 

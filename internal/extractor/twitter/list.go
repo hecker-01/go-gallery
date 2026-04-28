@@ -2,6 +2,7 @@ package twitter
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 
 	"github.com/hecker-01/go-gallery/internal/extractor"
@@ -40,7 +41,7 @@ func (e *TwitterListExtractor) Items(ctx context.Context) <-chan extractor.Item 
 			return e.fetchListPage(ctx, cursor)
 		}, func(err error) {
 			if e.Params.Logger != nil {
-				e.Params.Logger.Error("fetch list page failed", "list_id", e.listID, "error", err)
+				e.Params.Logger.Error(fmt.Sprintf("fetch list page failed (list %s): %v", e.listID, err))
 			}
 		}) {
 			select {
