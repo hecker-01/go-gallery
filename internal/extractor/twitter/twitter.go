@@ -39,8 +39,9 @@ const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 // It manages guest-token acquisition and adds the required auth headers.
 type base struct {
 	extractor.BaseExtractor
-	guestToken string // lazily populated
-	csrfToken  string // always set; from ct0 cookie or randomly generated
+	guestToken   string // lazily populated
+	csrfToken    string // always set; from ct0 cookie or randomly generated
+	endpointBase string // GraphQL API base, default "https://x.com"
 }
 
 func newBase(rawURL string, params extractor.ClientParams) base {
@@ -50,6 +51,7 @@ func newBase(rawURL string, params extractor.ClientParams) base {
 	return base{
 		BaseExtractor: extractor.NewBase(rawURL, params),
 		csrfToken:     randomCSRFToken(),
+		endpointBase:  "https://x.com",
 	}
 }
 

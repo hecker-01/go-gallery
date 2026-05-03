@@ -5,6 +5,7 @@ package gallery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/hecker-01/go-gallery/internal/extractor"
+	"github.com/hecker-01/go-gallery/internal/galleryerrs"
 	"github.com/hecker-01/go-gallery/internal/ratelimit"
 
 	// Blank-import Twitter extractors so their init() registers them.
@@ -243,6 +245,8 @@ func convertItem(item extractor.Item) Message {
 		return Media{Info: convertMeta(item.Meta), URL: item.URL}
 	case extractor.KindQueue:
 		return Queue{URL: item.QueueURL}
+	case extractor.KindSkipped:
+		return Skipped{TweetID: item.SkipTweetID, Reason: item.SkipReason}
 	default:
 		return Queue{URL: item.QueueURL}
 	}
@@ -317,6 +321,18 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 	msgs, errs := c.Extract(ctx, url)
 
 	for msg := range msgs {
+		// Handle tombstone / unavailable items emitted by extractors.
+		if skipped, ok := msg.(Skipped); ok {
+			mu.Lock()
+			result.UnavailableFiles++
+			if skipped.Cause != nil {
+				result.Errors = append(result.Errors, skipped.Cause)
+			}
+			mu.Unlock()
+			c.logger.Warn(fmt.Sprintf("unavailable [%s] tweet %s", skipped.Reason, skipped.TweetID))
+			continue
+		}
+
 		media, ok := msg.(Media)
 		if !ok {
 			continue
@@ -344,12 +360,11 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 			}
 		}
 
-		mu.Lock()
-		result.TotalFiles++
-		mu.Unlock()
-
 		if cfg.Simulate {
 			c.logger.Info("[simulate] " + info.MediaURL)
+			mu.Lock()
+			result.TotalFiles++
+			mu.Unlock()
 			continue
 		}
 
@@ -400,7 +415,14 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 			if dlErr != nil {
 				os.Remove(destPath)
 				mu.Lock()
-				result.FailedFiles++
+				// Classify permanent unavailability separately from transient failures.
+				var nfe *galleryerrs.NotFoundError
+				var authzErr *galleryerrs.AuthorizationError
+				if errors.As(dlErr, &nfe) || errors.As(dlErr, &authzErr) {
+					result.UnavailableFiles++
+				} else {
+					result.FailedFiles++
+				}
 				result.Errors = append(result.Errors, dlErr)
 				mu.Unlock()
 				_ = runPostProcessors(ctx, cfg.PostProcessors, destPath, mi, dlErr)
@@ -417,6 +439,9 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 				_ = c.archive.Put(ctx, mi.TweetID+":"+strconv.Itoa(mi.Num))
 			}
 
+			mu.Lock()
+			result.TotalFiles++
+			mu.Unlock()
 			c.logger.Info(destPath)
 		}(info, media.URL)
 	}

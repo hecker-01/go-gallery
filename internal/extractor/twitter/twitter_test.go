@@ -3,6 +3,7 @@ package twitter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hecker-01/go-gallery/internal/extractor"
+	"github.com/hecker-01/go-gallery/internal/galleryerrs"
 )
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -96,6 +98,46 @@ func TestParseUserID(t *testing.T) {
 	}
 }
 
+func TestParseUserID_SuspendedAccount(t *testing.T) {
+	resp := map[string]any{
+		"errors": []any{
+			map[string]any{
+				"code":    float64(63),
+				"message": "Sorry, you are not authorized to see this status.",
+			},
+		},
+	}
+	_, err := parseUserID(resp)
+	if err == nil {
+		t.Fatal("expected error for suspended account, got nil")
+	}
+	var nfe *galleryerrs.NotFoundError
+	if !errors.As(err, &nfe) {
+		t.Errorf("want *NotFoundError, got %T: %v", err, err)
+	} else if nfe.Reason != "suspended" {
+		t.Errorf("Reason = %q, want %q", nfe.Reason, "suspended")
+	}
+}
+
+func TestParseUserID_AuthError(t *testing.T) {
+	resp := map[string]any{
+		"errors": []any{
+			map[string]any{
+				"code":    float64(32),
+				"message": "Could not authenticate you.",
+			},
+		},
+	}
+	_, err := parseUserID(resp)
+	if err == nil {
+		t.Fatal("expected error for auth failure, got nil")
+	}
+	var authnErr *galleryerrs.AuthenticationError
+	if !errors.As(err, &authnErr) {
+		t.Errorf("want *AuthenticationError, got %T: %v", err, err)
+	}
+}
+
 func TestTweetResultToItems_Photo(t *testing.T) {
 	result := map[string]any{
 		"__typename": "Tweet",
@@ -128,7 +170,7 @@ func TestTweetResultToItems_Photo(t *testing.T) {
 		},
 	}
 
-	items := tweetResultToItems(result, 1, 1)
+	items := tweetResultToItems(result, 1, 1, "")
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want 1", len(items))
 	}
@@ -198,7 +240,7 @@ func TestTweetResultToItems_Video(t *testing.T) {
 		},
 	}
 
-	items := tweetResultToItems(result, 1, 1)
+	items := tweetResultToItems(result, 1, 1, "")
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want 1", len(items))
 	}
@@ -209,6 +251,144 @@ func TestTweetResultToItems_Video(t *testing.T) {
 	}
 	if item.Meta.Extension != "mp4" {
 		t.Errorf("extension: got %q, want mp4", item.Meta.Extension)
+	}
+}
+
+func TestTweetResultToItems_Tombstone(t *testing.T) {
+	result := map[string]any{
+		"__typename": "TweetTombstone",
+		"tombstone": map[string]any{
+			"text": map[string]any{
+				"text":     "This Tweet is from a suspended account.",
+				"entities": []any{},
+			},
+		},
+	}
+
+	items := tweetResultToItems(result, 0, 0, "tweet-1234567890")
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1 (KindSkipped)", len(items))
+	}
+	item := items[0]
+	if item.Kind != extractor.KindSkipped {
+		t.Errorf("kind: got %v, want KindSkipped", item.Kind)
+	}
+	if item.SkipTweetID != "1234567890" {
+		t.Errorf("SkipTweetID: got %q, want %q", item.SkipTweetID, "1234567890")
+	}
+	if item.SkipReason != "suspended" {
+		t.Errorf("SkipReason: got %q, want %q", item.SkipReason, "suspended")
+	}
+}
+
+func TestTweetResultToItems_TombstoneGeneric(t *testing.T) {
+	result := map[string]any{
+		"__typename": "TweetTombstone",
+		"tombstone": map[string]any{
+			"text": map[string]any{
+				"text": "This Tweet is unavailable.",
+			},
+		},
+	}
+
+	items := tweetResultToItems(result, 0, 0, "tweet-999")
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1 (KindSkipped)", len(items))
+	}
+	if items[0].Kind != extractor.KindSkipped {
+		t.Errorf("kind: got %v, want KindSkipped", items[0].Kind)
+	}
+	if items[0].SkipReason != "tombstone" {
+		t.Errorf("SkipReason: got %q, want %q", items[0].SkipReason, "tombstone")
+	}
+}
+
+func TestTweetTimeline_ContainsTombstone(t *testing.T) {
+	fixture := tweetTimelineWithTombstone()
+	items, _, err := parseTweetTimeline(fixture)
+	if err != nil {
+		t.Fatalf("parseTweetTimeline: %v", err)
+	}
+
+	var mediaCount, skippedCount int
+	for _, item := range items {
+		switch item.Kind {
+		case extractor.KindMedia:
+			mediaCount++
+		case extractor.KindSkipped:
+			skippedCount++
+		}
+	}
+	if mediaCount != 1 {
+		t.Errorf("mediaCount = %d, want 1", mediaCount)
+	}
+	if skippedCount != 1 {
+		t.Errorf("skippedCount = %d, want 1", skippedCount)
+	}
+}
+
+// ─── GraphQL HTTP error classification ───────────────────────────────────────
+
+func TestGraphQL_HTTP404_ReturnsNotFoundError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	params := extractor.ClientParams{HTTP: srv.Client()}
+	b := newBase("https://twitter.com/testuser", params)
+	b.guestToken = "test"
+	b.endpointBase = srv.URL
+
+	_, err := b.graphQL(context.Background(), "UserTweets", map[string]any{"userId": "1"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var nfe *galleryerrs.NotFoundError
+	if !errors.As(err, &nfe) {
+		t.Errorf("want *NotFoundError, got %T: %v", err, err)
+	}
+}
+
+func TestGraphQL_HTTP403_ReturnsAuthorizationError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	params := extractor.ClientParams{HTTP: srv.Client()}
+	b := newBase("https://twitter.com/testuser", params)
+	b.guestToken = "test"
+	b.endpointBase = srv.URL
+
+	_, err := b.graphQL(context.Background(), "UserTweets", map[string]any{"userId": "1"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var authzErr *galleryerrs.AuthorizationError
+	if !errors.As(err, &authzErr) {
+		t.Errorf("want *AuthorizationError, got %T: %v", err, err)
+	}
+}
+
+func TestGraphQL_HTTP401_ReturnsAuthenticationError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	params := extractor.ClientParams{HTTP: srv.Client()}
+	b := newBase("https://twitter.com/testuser", params)
+	b.guestToken = "test"
+	b.endpointBase = srv.URL
+
+	_, err := b.graphQL(context.Background(), "UserTweets", map[string]any{"userId": "1"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var authnErr *galleryerrs.AuthenticationError
+	if !errors.As(err, &authnErr) {
+		t.Errorf("want *AuthenticationError, got %T: %v", err, err)
 	}
 }
 
@@ -269,34 +449,30 @@ func TestUserExtractor_HTTPMock(t *testing.T) {
 	}
 }
 
-func TestSimulated429_PausesAndContinues(t *testing.T) {
-	resetAt := time.Now().Add(100 * time.Millisecond)
+func TestSimulated429_ContextCancelsWait(t *testing.T) {
+	// Reset time is 60 seconds in the future (plus the 10s buffer = ~70s wait).
+	// The context times out in 300ms, which should cancel the wait and return an error.
+	resetAt := time.Now().Add(60 * time.Second)
 	resetUnix := resetAt.Unix()
 
-	var callCount int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		if callCount == 1 {
-			w.Header().Set("x-rate-limit-reset", fmt.Sprintf("%d", resetUnix))
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{}})
+		w.Header().Set("x-rate-limit-reset", fmt.Sprintf("%d", resetUnix))
+		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 	defer srv.Close()
 
 	params := extractor.ClientParams{HTTP: srv.Client()}
 	b := newBase("https://twitter.com/testuser", params)
 	b.guestToken = "test"
+	b.endpointBase = srv.URL
 
-	// Override GraphQL endpoint
-	b.RawURL = srv.URL
+	// Short-lived context: the rate-limit wait should be interrupted.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
 
-	// graphQL will get a 429 on first call.
-	_, err := b.graphQL(context.Background(), "UserTweets", map[string]any{"userId": "1"})
+	_, err := b.graphQL(ctx, "UserTweets", map[string]any{"userId": "1"})
 	if err == nil {
-		t.Error("expected rate limit error, got nil")
+		t.Error("expected error after context cancellation, got nil")
 	}
 }
 
@@ -315,6 +491,51 @@ func tweetTimelineFixture() map[string]any {
 									"entries": []any{
 										tweetEntry("tweet-1", "100", "testuser"),
 										tweetEntry("tweet-2", "101", "testuser"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// tweetTimelineWithTombstone returns a timeline containing one live tweet and
+// one tombstone entry so parseTweetTimeline yields both KindMedia and KindSkipped.
+func tweetTimelineWithTombstone() map[string]any {
+	tombstoneEntry := map[string]any{
+		"entryId": "tweet-9999999999",
+		"content": map[string]any{
+			"entryType": "TimelineTimelineItem",
+			"itemContent": map[string]any{
+				"itemType": "TimelineTweet",
+				"tweet_results": map[string]any{
+					"result": map[string]any{
+						"__typename": "TweetTombstone",
+						"tombstone": map[string]any{
+							"text": map[string]any{
+								"text": "This Tweet is unavailable.",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	return map[string]any{
+		"data": map[string]any{
+			"user": map[string]any{
+				"result": map[string]any{
+					"timeline_v2": map[string]any{
+						"timeline": map[string]any{
+							"instructions": []any{
+								map[string]any{
+									"type": "TimelineAddEntries",
+									"entries": []any{
+										tweetEntry("tweet-100", "100", "testuser"),
+										tombstoneEntry,
 									},
 								},
 							},
@@ -369,11 +590,10 @@ func tweetEntry(entryID, tweetID, screenName string) map[string]any {
 	}
 }
 
-// patchGraphQLBase replaces the GraphQL base URL in a TwitterUserExtractor so
-// tests can route calls to httptest.Server instead of api.twitter.com.
-// This is a test helper — production code never calls it.
+// patchGraphQLBase replaces the GraphQL endpoint base in a TwitterUserExtractor
+// so tests can route calls to an httptest.Server instead of x.com.
 func patchGraphQLBase(ex *TwitterUserExtractor, baseURL string) {
-	ex.base.RawURL = baseURL
+	ex.base.endpointBase = baseURL
 }
 
 // graphQL wraps base.graphQL but overrides the endpoint host with RawURL

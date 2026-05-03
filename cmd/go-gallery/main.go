@@ -25,11 +25,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	gallery "github.com/hecker-01/go-gallery"
@@ -39,7 +41,59 @@ func main() {
 	os.Exit(run())
 }
 
+// reorderArgs moves flag tokens before positional arguments so that
+// `go-gallery URL --flag value` works in addition to `go-gallery --flag value URL`.
+// Go's flag package stops parsing at the first non-flag argument; this pre-pass
+// fixes the most common case of users putting flags after URLs.
+func reorderArgs() {
+	args := os.Args[1:]
+
+	// Flags that don't consume a following argument.
+	boolFlags := map[string]bool{
+		"g": true, "j": true, "K": true,
+		"simulate": true,
+		"v":        true, "verbose": true,
+		"q": true, "quiet": true,
+	}
+
+	var flags, positional []string
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			positional = append(positional, a)
+			i++
+			continue
+		}
+		name := strings.TrimLeft(a, "-")
+		// -flag=value is self-contained.
+		if strings.Contains(name, "=") {
+			flags = append(flags, a)
+			i++
+			continue
+		}
+		// Boolean flag: no following value token.
+		if boolFlags[name] {
+			flags = append(flags, a)
+			i++
+			continue
+		}
+		// Value flag: consume the next token as its value.
+		flags = append(flags, a)
+		if i+1 < len(args) {
+			flags = append(flags, args[i+1])
+			i += 2
+		} else {
+			i++
+		}
+	}
+
+	os.Args = append([]string{os.Args[0]}, append(flags, positional...)...)
+}
+
 func run() int {
+	reorderArgs()
+
 	// ── Flags ─────────────────────────────────────────────────────────────────
 	getURLs := flag.Bool("g", false, "print direct media URLs and exit")
 	getJSON := flag.Bool("j", false, "print per-item JSON to stdout and exit")
@@ -205,10 +259,44 @@ func runGetJSON(ctx context.Context, client *gallery.Client, rawURL string, logg
 
 func runDownload(ctx context.Context, client *gallery.Client, rawURL string, opts []gallery.DownloadOption, logger *slog.Logger) error {
 	result, err := client.Download(ctx, rawURL, opts...)
-	logger.Info(fmt.Sprintf("%d downloaded, %d skipped, %d failed (%s)",
-		result.TotalFiles, result.SkippedFiles, result.FailedFiles, result.Duration))
+
+	logger.Info(fmt.Sprintf("%d downloaded, %d skipped, %d unavailable, %d failed (%s)",
+		result.TotalFiles, result.SkippedFiles, result.UnavailableFiles, result.FailedFiles, result.Duration))
+
+	// Print per-item details grouped by category.
+	var unavailErrs, failedErrs []error
 	for _, e := range result.Errors {
-		logger.Warn(fmt.Sprintf("%v", e))
+		var nfe *gallery.NotFoundError
+		var authzErr *gallery.AuthorizationError
+		if errors.As(e, &nfe) || errors.As(e, &authzErr) {
+			unavailErrs = append(unavailErrs, e)
+		} else {
+			failedErrs = append(failedErrs, e)
+		}
 	}
-	return err
+	if len(unavailErrs) > 0 {
+		logger.Warn("unavailable:")
+		for _, e := range unavailErrs {
+			logger.Warn("  " + e.Error())
+		}
+	}
+	if len(failedErrs) > 0 {
+		logger.Warn("failed:")
+		for _, e := range failedErrs {
+			logger.Warn("  " + e.Error())
+		}
+	}
+
+	// Fatal extraction error (auth failure, challenge, network abort).
+	if err != nil {
+		return err
+	}
+
+	// Exit 1 only when nothing downloaded AND there were actual failures
+	// (not just unavailables — those are expected and exit 0 per gallery-dl behaviour).
+	if result.TotalFiles == 0 && result.FailedFiles > 0 {
+		return fmt.Errorf("%d download(s) failed, none succeeded", result.FailedFiles)
+	}
+
+	return nil
 }

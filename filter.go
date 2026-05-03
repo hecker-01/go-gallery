@@ -217,4 +217,3 @@ func (f ExprFilter) Accept(info *MediaInfo) bool {
 	b, _ := result.(bool)
 	return b
 }
-
