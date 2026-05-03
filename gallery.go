@@ -80,6 +80,7 @@ func NewClient(opts ...Option) *Client {
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
 			ForceAttemptHTTP2:     true,
 		}
 		if c.proxyURL != "" {
@@ -209,6 +210,7 @@ func (c *Client) Extract(ctx context.Context, url string) (<-chan Message, <-cha
 		Cache:       c.cache,
 		Logger:      c.logger,
 		RateLimitCB: c.rateLimitCb,
+		RateLimits:  c.rlRegistry,
 		Concurrency: c.concurrency,
 	}
 

@@ -107,6 +107,13 @@ func Paginate[T any](
 		defer close(out)
 		cursor := ""
 		for {
+			if cursor != "" {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(500 * time.Millisecond):
+				}
+			}
 			items, next, err := fetchPage(ctx, cursor)
 			if err != nil {
 				if len(onError) > 0 && onError[0] != nil {

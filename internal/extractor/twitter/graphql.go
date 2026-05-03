@@ -3,11 +3,13 @@ package twitter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/hecker-01/go-gallery/internal/extractor"
@@ -15,6 +17,10 @@ import (
 )
 
 const maxRateLimitRetries = 3
+
+// graphQLReqSeq is a per-process monotonic counter used to correlate
+// request/response debug log lines.
+var graphQLReqSeq atomic.Uint64
 
 // ─── Query IDs ────────────────────────────────────────────────────────────────
 
@@ -138,21 +144,78 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 	}
 	u.RawQuery = q.Encode()
 
+	reqID := fmt.Sprintf("%04x", graphQLReqSeq.Add(1))
+
 	var lastRateLimitErr error
 	for attempt := 0; attempt <= maxRateLimitRetries; attempt++ {
-		resp, err := b.doGet(ctx, u.String())
+		if b.Params.RateLimits != nil {
+			if wait := b.Params.RateLimits.Wait(operation, time.Now()); wait > 0 {
+				if b.Params.Logger != nil {
+					b.Params.Logger.Info(fmt.Sprintf("rate-limit window exhausted for %s; sleeping %s",
+						operation, wait.Round(time.Second)))
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(wait + 500*time.Millisecond):
+				}
+			}
+		}
+
+		if b.Params.Logger != nil {
+			b.Params.Logger.Debug(fmt.Sprintf("→ #%s %s (attempt %d/%d): %s",
+				reqID, operation, attempt+1, maxRateLimitRetries+1, u.String()))
+		}
+		reqStart := time.Now()
+
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, 60*time.Second)
+		resp, err := b.doGet(attemptCtx, u.String())
+		elapsed := time.Since(reqStart)
+
 		if err != nil {
+			attemptCancel()
+			if b.Params.Logger != nil {
+				b.Params.Logger.Debug(fmt.Sprintf("← #%s %s: error after %s: %v",
+					reqID, operation, elapsed.Round(time.Millisecond), err))
+			}
+			if (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) && ctx.Err() == nil {
+				// Per-attempt timeout (not parent cancellation): treat as transient.
+				if b.Params.Logger != nil {
+					b.Params.Logger.Warn(fmt.Sprintf("twitter %s request timed out (attempt %d/%d), retrying",
+						operation, attempt+1, maxRateLimitRetries+1))
+				}
+				lastRateLimitErr = err
+				continue
+			}
 			return nil, fmt.Errorf("twitter graphql %s: %w", operation, err)
+		}
+
+		if b.Params.Logger != nil {
+			b.Params.Logger.Debug(fmt.Sprintf("← #%s %s: %d in %s",
+				reqID, operation, resp.StatusCode, elapsed.Round(time.Millisecond)))
 		}
 		defer resp.Body.Close()
 
+		if b.Params.RateLimits != nil {
+			b.Params.RateLimits.Update(operation, resp)
+			if s := b.Params.RateLimits.Status(operation); s.Limit > 0 && s.Remaining > 0 && s.Remaining <= 3 {
+				if b.Params.Logger != nil {
+					b.Params.Logger.Warn(fmt.Sprintf("twitter %s near rate limit: %d/%d remaining (resets %s)",
+						operation, s.Remaining, s.Limit, s.ResetAt.UTC().Format(time.RFC3339)))
+				}
+			}
+		}
+
 		if resp.StatusCode == http.StatusUnauthorized {
+			attemptCancel()
 			return nil, &galleryerrs.AuthenticationError{}
 		}
 		if resp.StatusCode == http.StatusForbidden {
+			attemptCancel()
 			return nil, &galleryerrs.AuthorizationError{URL: operation}
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
+			attemptCancel() // body not needed; release context before sleeping
 			resetAt := parseRateLimitReset(resp)
 			if b.Params.RateLimitCB != nil {
 				b.Params.RateLimitCB(operation, resetAt)
@@ -177,16 +240,22 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 			return nil, lastRateLimitErr
 		}
 		if resp.StatusCode != http.StatusOK {
+			attemptCancel()
 			return nil, galleryerrs.ClassifyHTTPStatus(resp.StatusCode, endpoint, nil)
 		}
 
 		var result map[string]any
 		bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		attemptCancel() // body fully consumed; release context
 		if err != nil {
 			return nil, fmt.Errorf("twitter graphql %s: read body: %w", operation, err)
 		}
 		if err := json.Unmarshal(bodyBytes, &result); err != nil {
 			return nil, fmt.Errorf("twitter graphql %s: decode: %w", operation, err)
+		}
+		// Debug: log the full API result
+		if b.Params.Logger != nil {
+			b.Params.Logger.Debug(fmt.Sprintf("graphql result for %s: %s", operation, string(bodyBytes)))
 		}
 		// Debug: log full response when data is unexpectedly empty.
 		if data, ok := result["data"].(map[string]any); ok && len(data) == 0 {
@@ -521,6 +590,19 @@ func tweetResultToItems(result any, num, count int, entryID string) []extractor.
 			Kind:        extractor.KindSkipped,
 			SkipReason:  reason,
 			SkipTweetID: tweetID,
+		}}
+	}
+	// TweetUnavailable: DMCA takedown, suspended author, protected status, etc.
+	// These arrive without a "legacy" object; emit Skipped instead of dropping.
+	if typename == "TweetUnavailable" {
+		reason := "unavailable"
+		if r2, _ := r["reason"].(string); r2 != "" {
+			reason = strings.ToLower(r2)
+		}
+		return []extractor.Item{{
+			Kind:        extractor.KindSkipped,
+			SkipReason:  reason,
+			SkipTweetID: strings.TrimPrefix(entryID, "tweet-"),
 		}}
 	}
 	// Unwrap TweetWithVisibilityResults
