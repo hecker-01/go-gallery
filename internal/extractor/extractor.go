@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	"github.com/hecker-01/go-gallery/internal/ratelimit"
 )
 
 // ─── Item types ─────────────────────────────────────────────────────────────
@@ -76,7 +78,7 @@ type Item struct {
 	QueueURL string
 
 	// KindSkipped
-	SkipReason  string // "tombstone" | "deleted" | "suspended" | "dmca" | …
+	SkipReason  string // "tombstone" | "deleted" | "suspended" | "dmca" | ...
 	SkipTweetID string
 }
 
@@ -98,6 +100,7 @@ type ClientParams struct {
 	Cache       KVCache
 	Logger      *slog.Logger
 	RateLimitCB func(endpoint string, resetAt time.Time)
+	RateLimits  *ratelimit.Registry
 	Concurrency int
 }
 

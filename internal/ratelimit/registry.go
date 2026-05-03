@@ -109,11 +109,8 @@ func (r *Registry) Wait(endpoint string, now time.Time) time.Duration {
 	remaining := e.remaining
 	e.mu.Unlock()
 
-	// If we have remaining tokens and the window hasn't reset yet, proceed.
+	// Decrement is driven by Update() reading the response headers, not here.
 	if remaining > 0 {
-		e.mu.Lock()
-		e.remaining--
-		e.mu.Unlock()
 		return 0
 	}
 

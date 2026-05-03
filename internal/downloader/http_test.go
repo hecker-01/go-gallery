@@ -162,7 +162,7 @@ func TestHTTPDownloader_HTTP404_NoRetry(t *testing.T) {
 }
 
 func TestHTTPDownloader_MIME_Reject(t *testing.T) {
-	// Serve HTML — should be rejected.
+	// Serve HTML - should be rejected.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusOK)

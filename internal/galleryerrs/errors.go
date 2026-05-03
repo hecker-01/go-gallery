@@ -80,7 +80,7 @@ type ChallengeError struct {
 }
 
 func (e *ChallengeError) Error() string {
-	return fmt.Sprintf("Twitter challenge required for %s — log in via a browser to resolve", e.URL)
+	return fmt.Sprintf("Twitter challenge required for %s - log in via a browser to resolve", e.URL)
 }
 func (e *ChallengeError) isExtractionError() {}
 

@@ -1,19 +1,19 @@
 # go-gallery
 
-A Go library and CLI tool for downloading image and video galleries from Twitter/X. Uses the Twitter/X GraphQL and REST APIs — both guest-mode and authenticated — to extract media, then downloads files in parallel with deduplication, filtering, and post-processing support.
+A Go library and CLI tool for downloading image and video galleries from Twitter/X. Uses the Twitter/X GraphQL and REST APIs - both guest-mode and authenticated - to extract media, then downloads files in parallel with deduplication, filtering, and post-processing support.
 
 ## Features
 
-- **Multi-source extraction** — Single tweets, user timelines, likes, bookmarks, lists, search results, and home timeline
-- **Guest & authenticated** — Works without login; provide cookies for protected endpoints (likes, bookmarks, home timeline)
-- **Parallel downloads** — Configurable concurrency with resumable `.part` file support
-- **Deduplication** — SQLite-backed archive prevents re-downloading already-seen files
-- **Flexible filtering** — Filter by date range, content type, retweet/reply/quote flags, or arbitrary [`expr-lang`](https://github.com/expr-lang/expr) expressions
-- **Filename templates** — Powerful `{key}`, `{key!l}`, `{key:layout}`, `{key/old/new}`, `{key|sep}`, `{key?true:false}` patterns
-- **Post-processors** — `exec`, `mtime`, `rename`, `zip`, `hash`, `metadata` (JSON sidecar)
-- **yt-dlp fallback** — Optional HLS/complex stream support via `yt-dlp`
-- **Config file** — YAML, TOML, or JSON
-- **Graceful unavailability handling** — Deleted, DMCA-removed, suspended, and geo-blocked tweets are reported per-item and counted separately; the run never aborts because of them
+- **Multi-source extraction** - Single tweets, user timelines, likes, bookmarks, lists, search results, and home timeline
+- **Guest & authenticated** - Works without login; provide cookies for protected endpoints (likes, bookmarks, home timeline)
+- **Parallel downloads** - Configurable concurrency with resumable `.part` file support
+- **Deduplication** - SQLite-backed archive prevents re-downloading already-seen files
+- **Flexible filtering** - Filter by date range, content type, retweet/reply/quote flags, or arbitrary [`expr-lang`](https://github.com/expr-lang/expr) expressions
+- **Filename templates** - Powerful `{key}`, `{key!l}`, `{key:layout}`, `{key/old/new}`, `{key|sep}`, `{key?true:false}` patterns
+- **Post-processors** - `exec`, `mtime`, `rename`, `zip`, `hash`, `metadata` (JSON sidecar)
+- **yt-dlp fallback** - Optional HLS/complex stream support via `yt-dlp`
+- **Config file** - YAML, TOML, or JSON
+- **Graceful unavailability handling** - Deleted, DMCA-removed, suspended, and geo-blocked tweets are reported per-item and counted separately; the run never aborts because of them
 
 ## Installation
 
@@ -29,42 +29,42 @@ cd go-gallery
 go build ./cmd/go-gallery
 ```
 
-**Requirements:** Go 1.22+. Pure-Go SQLite is used — no CGO required for basic usage.
+**Requirements:** Go 1.22+. Pure-Go SQLite is used - no CGO required for basic usage.
 
 ## CLI Usage
 
-```
+```bash
 go-gallery [flags] URL...
 ```
 
 ### Flags
 
-| Flag                             | Default  | Description                                                                   |
-| -------------------------------- | -------- | ----------------------------------------------------------------------------- |
-| `-g`                             |          | Print direct media URLs and exit (no download)                                |
-| `-j`                             |          | Print per-item JSON to stdout and exit                                        |
-| `-K`                             |          | Print available template keywords for the first item                          |
-| `-simulate`                      |          | Run full pipeline but skip all I/O                                            |
-| `-d DIR`                         | `.`      | Base output directory; `twitter/{username}/…` structure is created beneath it |
-| `-D DIR`                         |          | Direct output directory; files are placed here with no subdirectory structure |
-| `-f PATTERN`                     | (config) | Filename template pattern                                                     |
-| `--concurrency N`                | `4`      | Number of parallel downloads                                                  |
-| `--cookies-from-browser BROWSER` |          | Import cookies from browser (`firefox`)                                       |
-| `--cookies-from-file PATH`       |          | Import from Netscape `cookies.txt` file                                       |
-| `--filter EXPR`                  |          | `expr-lang` expression to filter items                                        |
-| `--config PATH`                  |          | Path to a YAML/TOML/JSON config file                                          |
-| `-v` / `--verbose`               |          | Enable debug-level logging                                                    |
-| `-q` / `--quiet`                 |          | Suppress all output                                                           |
+| Flag                             | Default  | Description                                                                     |
+| -------------------------------- | -------- | ------------------------------------------------------------------------------- |
+| `-g`                             |          | Print direct media URLs and exit (no download)                                  |
+| `-j`                             |          | Print per-item JSON to stdout and exit                                          |
+| `-K`                             |          | Print available template keywords for the first item                            |
+| `-simulate`                      |          | Run full pipeline but skip all I/O                                              |
+| `-d DIR`                         | `.`      | Base output directory; `twitter/{username}/...` structure is created beneath it |
+| `-D DIR`                         |          | Direct output directory; files are placed here with no subdirectory structure   |
+| `-f PATTERN`                     | (config) | Filename template pattern                                                       |
+| `--concurrency N`                | `4`      | Number of parallel downloads                                                    |
+| `--cookies-from-browser BROWSER` |          | Import cookies from browser (`firefox`)                                         |
+| `--cookies-from-file PATH`       |          | Import from Netscape `cookies.txt` file                                         |
+| `--filter EXPR`                  |          | `expr-lang` expression to filter items                                          |
+| `--config PATH`                  |          | Path to a YAML/TOML/JSON config file                                            |
+| `-v` / `--verbose`               |          | Enable debug-level logging                                                      |
+| `-q` / `--quiet`                 |          | Suppress all output                                                             |
 
-**Output format** follows gallery-dl's style — `[source][level] message` with ANSI colors on terminals (auto-detected; set `NO_COLOR=1` to disable):
+**Output format** follows gallery-dl's style - `[source][level] message` with ANSI colors on terminals (auto-detected; set `NO_COLOR=1` to disable):
 
-```
+```log
 [twitter][info] twitter/username/1234567890_1.jpg
 [twitter][warning] unavailable [tombstone] tweet 9876543210
 [twitter][warning] rate limited on UserMedia; waiting 15s (resets at 2026-01-01T12:00:00Z)
 [go-gallery][info] 42 downloaded, 0 skipped, 1 unavailable, 0 failed (8.3s)
 [go-gallery][warning] unavailable:
-[go-gallery][warning]   unavailable (dmca): https://video.twimg.com/…/video.mp4
+[go-gallery][warning]   unavailable (dmca): https://video.twimg.com/.../video.mp4
 ```
 
 The summary line always reports four counters:
@@ -76,7 +76,7 @@ The summary line always reports four counters:
 | unavailable | Deleted, DMCA, suspended, geo-blocked items     |
 | failed      | Network errors, I/O errors, unexpected failures |
 
-**Exit code** — exits `0` even when some items were unavailable (matching gallery-dl behaviour). Exits `1` only on a fatal auth/challenge failure, or when zero files downloaded and there were real failures.
+**Exit code** - exits `0` even when some items were unavailable (matching gallery-dl behaviour). Exits `1` only on a fatal auth/challenge failure, or when zero files downloaded and there were real failures.
 
 > **`-d` vs `-D`** mirrors the convention from [gallery-dl](https://github.com/mikf/gallery-dl):
 > `-d` sets the _base_ directory and the tool still creates `twitter/{username}/` beneath it;
@@ -97,7 +97,7 @@ go-gallery --cookies-from-browser firefox https://x.com/i/bookmarks
 # Download to ~/gallery, keeping twitter/username/ subfolders
 go-gallery -d ~/gallery https://x.com/username/media
 
-# Download flat — all files directly into ~/flat, no subfolders
+# Download flat - all files directly into ~/flat, no subfolders
 go-gallery -D ~/flat https://x.com/username/media
 
 # Custom base directory and filename pattern
@@ -142,9 +142,9 @@ When a tweet or media file cannot be retrieved, the reason is reported per-item 
 | Reason             | Cause                                                   |
 | ------------------ | ------------------------------------------------------- |
 | `tombstone`        | Tweet removed (Twitter shows a placeholder in timeline) |
-| `deleted`          | HTTP 404 — content does not exist                       |
-| `gone`             | HTTP 410 — content permanently removed                  |
-| `dmca`             | HTTP 451 — DMCA / legal takedown                        |
+| `deleted`          | HTTP 404 - content does not exist                       |
+| `gone`             | HTTP 410 - content permanently removed                  |
+| `dmca`             | HTTP 451 - DMCA / legal takedown                        |
 | `suspended`        | Tweet from a suspended account                          |
 | `policy-violation` | Tweet removed for policy violation                      |
 | `protected`        | Tweet from a protected account you cannot access        |
@@ -265,14 +265,14 @@ import "github.com/hecker-01/go-gallery"
 
 client := gallery.NewClient(gallery.WithConcurrency(4))
 
-// Base directory — twitter/username/ structure is created beneath ./output
+// Base directory - twitter/username/ structure is created beneath ./output
 result, err := client.Download(ctx, "https://x.com/username/media",
     gallery.WithOutputDir("./output"),
 )
 fmt.Printf("%d downloaded, %d skipped, %d unavailable, %d failed\n",
     result.TotalFiles, result.SkippedFiles, result.UnavailableFiles, result.FailedFiles)
 
-// Direct directory — files go straight into ./flat with no subdirectories
+// Direct directory - files go straight into ./flat with no subdirectories
 result, err = client.Download(ctx, "https://x.com/username/media",
     gallery.WithDirectOutputDir("./flat"),
 )
@@ -298,9 +298,9 @@ for msg := range msgs {
         // m.URL is the direct download URL; m.Info holds all metadata
     case gallery.Skipped:
         // Item was permanently unavailable
-        // m.TweetID  — tweet ID (best-effort for timeline tombstones)
-        // m.Reason   — "tombstone" | "deleted" | "suspended" | "dmca" | …
-        // m.Cause    — typed error (*NotFoundError etc.) if available
+        // m.TweetID  - tweet ID (best-effort for timeline tombstones)
+        // m.Reason   - "tombstone" | "deleted" | "suspended" | "dmca" | ...
+        // m.Cause    - typed error (*NotFoundError etc.) if available
     }
 }
 if err := <-errs; err != nil {

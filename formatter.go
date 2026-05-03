@@ -15,15 +15,15 @@ import (
 //
 //	Literal text is copied verbatim.
 //
-//	{key}                  — value from the keywords map
-//	{key:layout}           — datetime value using Go's time.Format layout
-//	{key!l}                — value forced to lower-case
-//	{key!u}                — value forced to upper-case
-//	{key!j}                — value JSON-encoded
-//	{key/old/new}          — value with old replaced by new (first occurrence)
-//	{key//old/new}         — value with all occurrences replaced
-//	{key|sep}              — slice value joined with sep
-//	{key?trueval:falseval} — if value is truthy use trueval else falseval
+//	{key}                  - value from the keywords map
+//	{key:layout}           - datetime value using Go's time.Format layout
+//	{key!l}                - value forced to lower-case
+//	{key!u}                - value forced to upper-case
+//	{key!j}                - value JSON-encoded
+//	{key/old/new}          - value with old replaced by new (first occurrence)
+//	{key//old/new}         - value with all occurrences replaced
+//	{key|sep}              - slice value joined with sep
+//	{key?trueval:falseval} - if value is truthy use trueval else falseval
 //
 // Specifiers may be combined left-to-right, e.g. {author.screen_name!l/bad/good}.
 // Unknown keys produce an empty string rather than an error so patterns are
@@ -73,7 +73,7 @@ type fmtToken struct {
 	spec    varSpec // kindVar
 }
 
-// varSpec describes a parsed {…} block.
+// varSpec describes a parsed {...} block.
 type varSpec struct {
 	key string
 
@@ -104,7 +104,7 @@ func parsePattern(pattern string) ([]fmtToken, error) {
 	for i < len(pattern) {
 		start := strings.IndexByte(pattern[i:], '{')
 		if start == -1 {
-			// No more variables — append the rest as a literal.
+			// No more variables - append the rest as a literal.
 			tokens = append(tokens, fmtToken{kind: kindLiteral, literal: pattern[i:]})
 			break
 		}

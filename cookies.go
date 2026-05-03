@@ -37,7 +37,7 @@ func CookiesFromFile(path string) (http.CookieJar, error) {
 			continue
 		}
 		domain := fields[0]
-		// fields[1] is domain flag (TRUE/FALSE — include subdomains)
+		// fields[1] is domain flag (TRUE/FALSE - include subdomains)
 		path := fields[2]
 		secure := strings.EqualFold(fields[3], "true")
 		var expires time.Time
@@ -95,7 +95,7 @@ func CookiesFromBrowser(browserName string) (http.CookieJar, error) {
 		return nil, &InputError{
 			Field: "browser",
 			Message: fmt.Sprintf(
-				"unsupported browser %q — only \"firefox\" is supported in v0; "+
+				"unsupported browser %q - only \"firefox\" is supported in v0; "+
 					"use WithCookiesFromFile for other browsers",
 				browserName,
 			),

@@ -13,7 +13,7 @@ var ErrYTDLPNotFound = errors.New("yt-dlp not found in PATH; install it or use H
 
 // YTDLPDownloader wraps the yt-dlp CLI for HLS and complex video streams.
 // It is feature-flagged: if yt-dlp is not installed at construction time,
-// every Download call returns ErrYTDLPNotFound — no panic.
+// every Download call returns ErrYTDLPNotFound - no panic.
 type YTDLPDownloader struct {
 	path string // empty when not available
 }

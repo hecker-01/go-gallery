@@ -8,7 +8,7 @@ import (
 )
 
 // Truncate returns s truncated to at most maxRunes UTF-8 runes, appending
-// suffix (e.g. "…") if truncation occurred. maxRunes must be > 0.
+// suffix (e.g. "...") if truncation occurred. maxRunes must be > 0.
 func Truncate(s, suffix string, maxRunes int) string {
 	if maxRunes <= 0 {
 		return suffix

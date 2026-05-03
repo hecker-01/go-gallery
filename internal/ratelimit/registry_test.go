@@ -63,10 +63,11 @@ func TestRegistry_Wait_HasRemaining(t *testing.T) {
 	if delay != 0 {
 		t.Errorf("Wait should return 0 when remaining > 0, got %v", delay)
 	}
-	// Remaining should have decremented.
+	// Wait must NOT mutate remaining; Update from response headers is the
+	// single source of truth for the counter.
 	s := reg.Status("SearchTimeline")
-	if s.Remaining != 48 {
-		t.Errorf("Remaining after Wait: got %d, want 48", s.Remaining)
+	if s.Remaining != 49 {
+		t.Errorf("Remaining after Wait: got %d, want 49 (Wait must not decrement)", s.Remaining)
 	}
 }
 

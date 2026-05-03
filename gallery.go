@@ -80,6 +80,7 @@ func NewClient(opts ...Option) *Client {
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
 			ForceAttemptHTTP2:     true,
 		}
 		if c.proxyURL != "" {
@@ -209,6 +210,7 @@ func (c *Client) Extract(ctx context.Context, url string) (<-chan Message, <-cha
 		Cache:       c.cache,
 		Logger:      c.logger,
 		RateLimitCB: c.rateLimitCb,
+		RateLimits:  c.rlRegistry,
 		Concurrency: c.concurrency,
 	}
 
@@ -410,6 +412,18 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 				return
 			}
 
+			for _, pp := range cfg.PostProcessors {
+				if err := pp.OnPrepare(ctx, mi); err != nil {
+					f.Close()
+					os.Remove(destPath)
+					mu.Lock()
+					result.FailedFiles++
+					result.Errors = append(result.Errors, err)
+					mu.Unlock()
+					return
+				}
+			}
+
 			dlErr := dl.Download(ctx, mediaURL, f, cfg)
 			f.Close()
 			if dlErr != nil {
@@ -494,7 +508,7 @@ func (c *Client) GetKeywords(ctx context.Context, url string) (map[string]any, e
 	return nil, &InputError{Message: "no media items found for URL: " + url}
 }
 
-// GetJSON returns a channel of json.RawMessage — one per tweet's full metadata
+// GetJSON returns a channel of json.RawMessage - one per tweet's full metadata
 // object. Equivalent to the -j flag.
 func (c *Client) GetJSON(ctx context.Context, url string) (<-chan json.RawMessage, <-chan error) {
 	out := make(chan json.RawMessage)
@@ -566,7 +580,7 @@ func (d *httpDownloader) Download(ctx context.Context, rawURL string, dest io.Wr
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return &HttpError{StatusCode: resp.StatusCode, URL: rawURL}
+		return galleryerrs.ClassifyHTTPStatus(resp.StatusCode, rawURL, nil)
 	}
 	_, err = io.Copy(dest, resp.Body)
 	return err

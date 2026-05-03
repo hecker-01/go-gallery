@@ -15,10 +15,15 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hecker-01/go-gallery/internal/extractor"
 )
+
+// guestWarnOnce ensures the guest-mode rate-limit warning is logged at most
+// once per process, regardless of how many extractors are constructed.
+var guestWarnOnce sync.Once
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -76,6 +81,12 @@ func (b *base) ensureGuestToken(ctx context.Context) error {
 	if b.hasAuthToken() {
 		return nil
 	}
+
+	guestWarnOnce.Do(func() {
+		if b.Params.Logger != nil {
+			b.Params.Logger.Warn("twitter: running in guest mode - Twitter rate limits are very low. Use --cookies-from-browser firefox or --cookies-from-file to authenticate.")
+		}
+	})
 
 	// Try the KV cache first.
 	if b.Params.Cache != nil {
@@ -182,7 +193,7 @@ func (b *base) authHeaders() map[string]string {
 		}
 	}
 
-	// Always send x-csrf-token — Twitter silently returns {"data":{}}
+	// Always send x-csrf-token - Twitter silently returns {"data":{}}
 	// when this header is missing, even for unauthenticated GraphQL calls.
 	h["x-csrf-token"] = csrfToken
 	return h

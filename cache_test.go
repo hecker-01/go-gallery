@@ -50,7 +50,7 @@ func TestSQLiteCache_Expiry(t *testing.T) {
 
 	ctx := context.Background()
 
-	// TTL of 1 nanosecond — effectively already expired.
+	// TTL of 1 nanosecond - effectively already expired.
 	if err := c.Set(ctx, "short", "val", time.Nanosecond); err != nil {
 		t.Fatal(err)
 	}

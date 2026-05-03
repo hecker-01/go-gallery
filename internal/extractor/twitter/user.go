@@ -2,6 +2,7 @@ package twitter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/hecker-01/go-gallery/internal/extractor"
@@ -30,6 +31,14 @@ func newUserExtractor(rawURL string, params extractor.ClientParams) extractor.Ex
 func (e *TwitterUserExtractor) Name() string     { return "twitter:user" }
 func (e *TwitterUserExtractor) Category() string { return "twitter" }
 
+// Items resolves the user's numeric ID, emits a KindDirectory item, then
+// paginates the UserMedia timeline and emits one KindMedia (or KindSkipped)
+// item per piece of media.
+//
+// UserMedia is always used regardless of whether the source URL included the
+// /media path segment. This ensures server-side filtering to media-only tweets,
+// which is more efficient than fetching all tweets (UserTweets) and discarding
+// the text-only ones client-side.
 func (e *TwitterUserExtractor) Items(ctx context.Context) <-chan extractor.Item {
 	out := make(chan extractor.Item)
 	go func() {
@@ -51,10 +60,7 @@ func (e *TwitterUserExtractor) Items(ctx context.Context) <-chan extractor.Item 
 			return
 		}
 
-		operation := "UserTweets"
-		if e.mediaOnly {
-			operation = "UserMedia"
-		}
+		operation := "UserMedia"
 
 		for item := range extractor.Paginate(ctx, func(ctx context.Context, cursor string) ([]extractor.Item, string, error) {
 			return e.fetchUserPage(ctx, userID, operation, cursor)
@@ -104,11 +110,29 @@ func (e *TwitterUserExtractor) fetchUserPage(ctx context.Context, userID, operat
 	if err != nil {
 		return nil, "", err
 	}
+	if e.Params.Logger != nil && vars["cursor"] != nil {
+		if raw, jerr := json.Marshal(resp); jerr == nil {
+			e.Params.Logger.Debug(fmt.Sprintf("%s raw page response: %s", operation, string(raw)))
+		}
+	}
 	items, cursor, err := parseTweetTimeline(resp)
 	if err != nil {
 		return nil, "", err
 	}
-	// Backfill screen name from URL when the API response omits it.
+	if e.Params.Logger != nil {
+		cursorInStr := "first"
+		if s, _ := vars["cursor"].(string); s != "" {
+			cursorInStr = s
+		}
+		cursorOutStr := "none (end)"
+		if cursor != "" {
+			cursorOutStr = cursor
+		}
+		e.Params.Logger.Debug(fmt.Sprintf("%s page: cursor_in=%s → %d items, cursor_out=%s",
+			operation, cursorInStr, len(items), cursorOutStr))
+	}
+	// Backfill screen name from URL when the API omits it. The moduleItems
+	// format (page 2+ of UserMedia) sometimes omits author.core.screen_name.
 	for i := range items {
 		if items[i].Meta != nil && items[i].Meta.Author.ScreenName == "" {
 			items[i].Meta.Author.ScreenName = e.screenName

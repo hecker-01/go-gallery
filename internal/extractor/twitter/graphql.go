@@ -3,11 +3,13 @@ package twitter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/hecker-01/go-gallery/internal/extractor"
@@ -15,6 +17,10 @@ import (
 )
 
 const maxRateLimitRetries = 3
+
+// graphQLReqSeq is a per-process monotonic counter used to correlate
+// request/response debug log lines.
+var graphQLReqSeq atomic.Uint64
 
 // ─── Query IDs ────────────────────────────────────────────────────────────────
 
@@ -138,21 +144,78 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 	}
 	u.RawQuery = q.Encode()
 
+	reqID := fmt.Sprintf("%04x", graphQLReqSeq.Add(1))
+
 	var lastRateLimitErr error
 	for attempt := 0; attempt <= maxRateLimitRetries; attempt++ {
-		resp, err := b.doGet(ctx, u.String())
+		if b.Params.RateLimits != nil {
+			if wait := b.Params.RateLimits.Wait(operation, time.Now()); wait > 0 {
+				if b.Params.Logger != nil {
+					b.Params.Logger.Info(fmt.Sprintf("rate-limit window exhausted for %s; sleeping %s",
+						operation, wait.Round(time.Second)))
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(wait + 500*time.Millisecond):
+				}
+			}
+		}
+
+		if b.Params.Logger != nil {
+			b.Params.Logger.Debug(fmt.Sprintf("→ #%s %s (attempt %d/%d): %s",
+				reqID, operation, attempt+1, maxRateLimitRetries+1, u.String()))
+		}
+		reqStart := time.Now()
+
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, 60*time.Second)
+		resp, err := b.doGet(attemptCtx, u.String())
+		elapsed := time.Since(reqStart)
+
 		if err != nil {
+			attemptCancel()
+			if b.Params.Logger != nil {
+				b.Params.Logger.Debug(fmt.Sprintf("← #%s %s: error after %s: %v",
+					reqID, operation, elapsed.Round(time.Millisecond), err))
+			}
+			if (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) && ctx.Err() == nil {
+				// Per-attempt timeout (not parent cancellation): treat as transient.
+				if b.Params.Logger != nil {
+					b.Params.Logger.Warn(fmt.Sprintf("twitter %s request timed out (attempt %d/%d), retrying",
+						operation, attempt+1, maxRateLimitRetries+1))
+				}
+				lastRateLimitErr = err
+				continue
+			}
 			return nil, fmt.Errorf("twitter graphql %s: %w", operation, err)
+		}
+
+		if b.Params.Logger != nil {
+			b.Params.Logger.Debug(fmt.Sprintf("← #%s %s: %d in %s",
+				reqID, operation, resp.StatusCode, elapsed.Round(time.Millisecond)))
 		}
 		defer resp.Body.Close()
 
+		if b.Params.RateLimits != nil {
+			b.Params.RateLimits.Update(operation, resp)
+			if s := b.Params.RateLimits.Status(operation); s.Limit > 0 && s.Remaining > 0 && s.Remaining <= 3 {
+				if b.Params.Logger != nil {
+					b.Params.Logger.Warn(fmt.Sprintf("twitter %s near rate limit: %d/%d remaining (resets %s)",
+						operation, s.Remaining, s.Limit, s.ResetAt.UTC().Format(time.RFC3339)))
+				}
+			}
+		}
+
 		if resp.StatusCode == http.StatusUnauthorized {
+			attemptCancel()
 			return nil, &galleryerrs.AuthenticationError{}
 		}
 		if resp.StatusCode == http.StatusForbidden {
+			attemptCancel()
 			return nil, &galleryerrs.AuthorizationError{URL: operation}
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
+			attemptCancel() // body not needed; release context before sleeping
 			resetAt := parseRateLimitReset(resp)
 			if b.Params.RateLimitCB != nil {
 				b.Params.RateLimitCB(operation, resetAt)
@@ -177,16 +240,22 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 			return nil, lastRateLimitErr
 		}
 		if resp.StatusCode != http.StatusOK {
+			attemptCancel()
 			return nil, galleryerrs.ClassifyHTTPStatus(resp.StatusCode, endpoint, nil)
 		}
 
 		var result map[string]any
 		bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		attemptCancel() // body fully consumed; release context
 		if err != nil {
 			return nil, fmt.Errorf("twitter graphql %s: read body: %w", operation, err)
 		}
 		if err := json.Unmarshal(bodyBytes, &result); err != nil {
 			return nil, fmt.Errorf("twitter graphql %s: decode: %w", operation, err)
+		}
+		// Debug: log the full API result
+		if b.Params.Logger != nil {
+			b.Params.Logger.Debug(fmt.Sprintf("graphql result for %s: %s", operation, string(bodyBytes)))
 		}
 		// Debug: log full response when data is unexpectedly empty.
 		if data, ok := result["data"].(map[string]any); ok && len(data) == 0 {
@@ -377,16 +446,73 @@ func findTimelineInstructions(resp map[string]any) ([]any, error) {
 	return nil, fmt.Errorf("could not locate timeline instructions in response")
 }
 
+// extractTimelineItems walks a Twitter timeline instructions array and returns
+// all media items and the next pagination cursor. It handles three instruction
+// shapes that Twitter uses depending on the endpoint and page number:
+//
+//  1. type="TimelineAddEntries" - standard format; entries contain individual
+//     tweet items or TimelineTimelineModule groups.
+//
+//  2. Inline module (field "moduleEntryId" present, no "type") - used by
+//     UserMedia on page 2+; the instruction itself is the module and carries
+//     tweet items directly in "moduleItems".
+//
+//  3. type="TimelineAddToModule" - continuation of an existing media grid module;
+//     also carries items in "moduleItems".
+//
+// Cursors for the next page arrive either as cursor-bottom entries inside
+// TimelineAddEntries, or as cursor-bottom items inside moduleItems.
+//
+// type="TimelineTerminateTimeline" with direction="Bottom" signals the end of
+// the timeline; the cursor is cleared so pagination stops cleanly.
 func extractTimelineItems(instructions []any) ([]extractor.Item, string, error) {
 	var items []extractor.Item
 	var nextCursor string
+	terminated := false
 
 	for _, instrAny := range instructions {
 		instr, ok := instrAny.(map[string]any)
 		if !ok {
 			continue
 		}
+
+		// Page 2+ format for UserMedia: instruction is a module inline with
+		// moduleEntryId + moduleItems, no "type" wrapper.
+		if _, hasModule := instr["moduleEntryId"]; hasModule {
+			moduleItems, _ := instr["moduleItems"].([]any)
+			for _, miAny := range moduleItems {
+				mi, ok := miAny.(map[string]any)
+				if !ok {
+					continue
+				}
+				entryID, _ := mi["entryId"].(string)
+				item, _ := mi["item"].(map[string]any)
+				if item == nil {
+					continue
+				}
+				ic, _ := item["itemContent"].(map[string]any)
+				if strings.HasPrefix(entryID, "cursor-bottom") || strings.Contains(entryID, "-cursor-bottom") {
+					if ic != nil {
+						if v, _ := ic["value"].(string); v != "" {
+							nextCursor = v
+						}
+					}
+					continue
+				}
+				if strings.HasPrefix(entryID, "cursor-") {
+					continue
+				}
+				newItems := itemContentToItems(ic, entryID)
+				items = append(items, newItems...)
+			}
+			continue
+		}
+
 		switch instr["type"] {
+		case "TimelineTerminateTimeline":
+			if dir, _ := instr["direction"].(string); dir == "Bottom" {
+				terminated = true
+			}
 		case "TimelineAddEntries":
 			entries, _ := instr["entries"].([]any)
 			for _, entryAny := range entries {
@@ -407,6 +533,33 @@ func extractTimelineItems(instructions []any) ([]extractor.Item, string, error) 
 				newItems := entryToItems(entry)
 				items = append(items, newItems...)
 			}
+		case "TimelineAddToModule":
+			moduleItems, _ := instr["moduleItems"].([]any)
+			for _, miAny := range moduleItems {
+				mi, ok := miAny.(map[string]any)
+				if !ok {
+					continue
+				}
+				entryID, _ := mi["entryId"].(string)
+				item, _ := mi["item"].(map[string]any)
+				if item == nil {
+					continue
+				}
+				ic, _ := item["itemContent"].(map[string]any)
+				if strings.HasPrefix(entryID, "cursor-bottom") || strings.Contains(entryID, "-cursor-bottom") {
+					if ic != nil {
+						if v, _ := ic["value"].(string); v != "" {
+							nextCursor = v
+						}
+					}
+					continue
+				}
+				if strings.HasPrefix(entryID, "cursor-") {
+					continue
+				}
+				newItems := itemContentToItems(ic, entryID)
+				items = append(items, newItems...)
+			}
 		case "TimelineReplaceEntry":
 			entry, _ := instr["entry"].(map[string]any)
 			if entry != nil {
@@ -419,9 +572,15 @@ func extractTimelineItems(instructions []any) ([]extractor.Item, string, error) 
 			}
 		}
 	}
+	if terminated {
+		nextCursor = ""
+	}
 	return items, nextCursor, nil
 }
 
+// extractCursorFromEntry reads the pagination cursor value from a timeline
+// entry. It tries entry.content.value first (TimelineTimelineCursor shape),
+// then entry.content.itemContent.value (older cursor shape).
 func extractCursorFromEntry(entry map[string]any) string {
 	content, _ := entry["content"].(map[string]any)
 	if content == nil {
@@ -440,6 +599,9 @@ func extractCursorFromEntry(entry map[string]any) string {
 	return ""
 }
 
+// entryToItems converts a single TimelineAddEntries entry to extractor Items.
+// Handles TimelineTimelineItem (single tweet) and TimelineTimelineModule
+// (tweet group / media grid row) content types.
 func entryToItems(entry map[string]any) []extractor.Item {
 	entryID, _ := entry["entryId"].(string)
 	content, ok := entry["content"].(map[string]any)
@@ -471,6 +633,9 @@ func entryToItems(entry map[string]any) []extractor.Item {
 	return nil
 }
 
+// itemContentToItems extracts items from a TimelineTweet itemContent object.
+// Only TimelineTweet itemType is processed; all other content types (ads,
+// promoted content, etc.) are silently ignored.
 func itemContentToItems(ic map[string]any, entryID string) []extractor.Item {
 	if ic == nil {
 		return nil
@@ -488,14 +653,25 @@ func itemContentToItems(ic map[string]any, entryID string) []extractor.Item {
 }
 
 // tweetResultToItems converts a raw tweet result map to extractor Items.
+//
+// num and count control media item numbering. Pass 0 for both when called from
+// timeline pagination - items will be numbered 1…len(media) automatically.
+// Pass explicit values only for direct single-tweet lookups (TweetDetail).
+//
 // entryID is the timeline entryId (e.g. "tweet-1234567890") used to populate
-// SkipTweetID when a tombstone is encountered; pass "" for direct-tweet lookups.
+// SkipTweetID when a tombstone or unavailable tweet is encountered; pass "" for
+// direct-tweet lookups.
+//
+// Per-media availability is checked via ext_media_availability before emitting
+// a download item. Media marked with a non-"Available" status (e.g. DMCA
+// takedowns reported as reason="Dmcaed") emits a KindSkipped item instead so
+// the caller can log and count it without attempting a download.
 func tweetResultToItems(result any, num, count int, entryID string) []extractor.Item {
 	r, ok := result.(map[string]any)
 	if !ok {
 		return nil
 	}
-	// Handle tweet tombstone — emit a KindSkipped item instead of silently dropping.
+	// Handle tweet tombstone - emit a KindSkipped item instead of silently dropping.
 	typename, _ := r["__typename"].(string)
 	if typename == "TweetTombstone" {
 		reason := "tombstone"
@@ -521,6 +697,19 @@ func tweetResultToItems(result any, num, count int, entryID string) []extractor.
 			Kind:        extractor.KindSkipped,
 			SkipReason:  reason,
 			SkipTweetID: tweetID,
+		}}
+	}
+	// TweetUnavailable: DMCA takedown, suspended author, protected status, etc.
+	// These arrive without a "legacy" object; emit Skipped instead of dropping.
+	if typename == "TweetUnavailable" {
+		reason := "unavailable"
+		if r2, _ := r["reason"].(string); r2 != "" {
+			reason = strings.ToLower(r2)
+		}
+		return []extractor.Item{{
+			Kind:        extractor.KindSkipped,
+			SkipReason:  reason,
+			SkipTweetID: strings.TrimPrefix(entryID, "tweet-"),
 		}}
 	}
 	// Unwrap TweetWithVisibilityResults
@@ -552,7 +741,7 @@ func tweetResultToItems(result any, num, count int, entryID string) []extractor.
 	isReply := strOrEmpty(legacy["in_reply_to_status_id_str"]) != ""
 	isQuote := boolOrFalse(legacy["is_quote_status"])
 
-	// Author — try multiple paths used by different API response shapes:
+	// Author - try multiple paths used by different API response shapes:
 	// 1. Classic: r["core"]["user_results"]["result"]["legacy"]
 	// 2. New 2025: r["core"]["user_results"]["result"]["core"] for screen_name/name
 	// 3. New:     r["author"]["core"]["screen_name"] (gallery-dl 2025 format)
@@ -650,6 +839,26 @@ func tweetResultToItems(result any, num, count int, entryID string) []extractor.
 		m, ok := mAny.(map[string]any)
 		if !ok {
 			continue
+		}
+		// Skip media that Twitter has marked unavailable (DMCA, geo-block, etc.).
+		if avail, _ := m["ext_media_availability"].(map[string]any); avail != nil {
+			status, _ := avail["status"].(string)
+			apiReason, _ := avail["reason"].(string)
+			unavailable := (status != "" && status != "Available") || apiReason != ""
+			if unavailable {
+				skipReason := strings.ToLower(apiReason)
+				if skipReason == "dmcaed" {
+					skipReason = "dmca"
+				} else if skipReason == "" {
+					skipReason = strings.ToLower(status)
+				}
+				items = append(items, extractor.Item{
+					Kind:        extractor.KindSkipped,
+					SkipReason:  skipReason,
+					SkipTweetID: tweetID,
+				})
+				continue
+			}
 		}
 		mediaType, _ := m["type"].(string)
 
