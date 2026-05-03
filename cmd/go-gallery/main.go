@@ -9,7 +9,7 @@
 //	-g                    Print direct media URLs and exit (GetURLs mode)
 //	-j                    Print per-item JSON and exit (GetJSON mode)
 //	-K                    Print template keywords for first item and exit
-//	-simulate             Run extraction and filtering but skip all I/O
+//	--simulate            Run extraction and filtering but skip all I/O
 //	-d DIR                Base output directory (default: current directory); {category}/{username}/… structure is created beneath it
 //	-D DIR                Direct output directory; files are placed here with no subdirectory structure
 //	-f PATTERN            Filename formatter pattern
@@ -20,6 +20,7 @@
 //	--config PATH         Path to YAML/TOML/JSON config file
 //	-v / --verbose        Enable debug-level logging
 //	-q / --quiet          Suppress all output
+//	--debug               Enable debug-level logging and trace all program activity
 package main
 
 import (
@@ -53,7 +54,8 @@ func reorderArgs() {
 		"g": true, "j": true, "K": true,
 		"simulate": true,
 		"v":        true, "verbose": true,
-		"q": true, "quiet": true,
+		"q":        true, "quiet": true,
+		"debug":    true,
 	}
 
 	var flags, positional []string
@@ -99,11 +101,12 @@ func run() int {
 	getJSON := flag.Bool("j", false, "print per-item JSON to stdout and exit")
 	getKeywords := flag.Bool("K", false, "print template keywords for first item and exit")
 	simulate := flag.Bool("simulate", false, "run full pipeline but skip network/filesystem I/O")
-	var isVerbose, isQuiet bool
+	var isVerbose, isQuiet, isDebug bool
 	flag.BoolVar(&isVerbose, "v", false, "enable debug-level logging")
 	flag.BoolVar(&isVerbose, "verbose", false, "enable debug-level logging")
 	flag.BoolVar(&isQuiet, "q", false, "suppress all output")
 	flag.BoolVar(&isQuiet, "quiet", false, "suppress all output")
+	flag.BoolVar(&isDebug, "debug", false, "enable debug-level logging and trace all program activity")
 	baseDir := flag.String("d", ".", "base output directory; {category}/{username}/… structure is created beneath it")
 	directDir := flag.String("D", "", "direct output directory; files are placed here with no subdirectory structure")
 	filenameFormat := flag.String("f", "", "filename formatter pattern (overrides config)")
@@ -130,10 +133,17 @@ func run() int {
 	switch {
 	case isQuiet:
 		logLevel = levelQuiet
-	case isVerbose:
+	case isDebug, isVerbose:
 		logLevel = slog.LevelDebug
 	}
 	logger := slog.New(newGalleryHandler(os.Stderr, logLevel))
+
+	if isDebug {
+		logger.Debug(fmt.Sprintf("config: concurrency=%d baseDir=%q directDir=%q filenameFormat=%q simulate=%v filter=%q configPath=%q",
+			*concurrency, *baseDir, *directDir, *filenameFormat, *simulate, *filterExpr, *configPath))
+		logger.Debug(fmt.Sprintf("cookies: browser=%q file=%q", *cookiesBrowser, *cookiesFile))
+		logger.Debug(fmt.Sprintf("processing %d URL(s)", len(urls)))
+	}
 
 	// ── Client options ────────────────────────────────────────────────────────
 	opts := []gallery.Option{
@@ -188,6 +198,9 @@ func run() int {
 	if filter != nil {
 		dlOpts = append(dlOpts, gallery.WithFilter(filter))
 	}
+	if isDebug {
+		dlOpts = append(dlOpts, gallery.WithPostProcessors(&debugPostProcessor{logger: logger}))
+	}
 
 	// ── Context with OS signal cancellation ───────────────────────────────────
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -199,6 +212,9 @@ func run() int {
 	// ── Mode dispatch ─────────────────────────────────────────────────────────
 	exitCode := 0
 	for _, rawURL := range urls {
+		if isDebug {
+			logger.Debug(fmt.Sprintf("processing URL: %s", rawURL))
+		}
 		switch {
 		case *getURLs:
 			if err := runGetURLs(ctx, client, rawURL, logger); err != nil {
@@ -226,6 +242,24 @@ func run() int {
 		}
 	}
 	return exitCode
+}
+
+// debugPostProcessor logs each media item before download via OnPrepare.
+type debugPostProcessor struct{ logger *slog.Logger }
+
+func (d *debugPostProcessor) Name() string { return "debug" }
+func (d *debugPostProcessor) OnPrepare(_ context.Context, info *gallery.MediaInfo) error {
+	d.logger.Debug(fmt.Sprintf("processing %s", info.MediaURL))
+	return nil
+}
+func (d *debugPostProcessor) OnFile(_ context.Context, _ string, _ *gallery.MediaInfo) error {
+	return nil
+}
+func (d *debugPostProcessor) OnAfter(_ context.Context, _ string, _ *gallery.MediaInfo) error {
+	return nil
+}
+func (d *debugPostProcessor) OnError(_ context.Context, _ error, _ *gallery.MediaInfo) error {
+	return nil
 }
 
 func runGetURLs(ctx context.Context, client *gallery.Client, rawURL string, logger *slog.Logger) error {

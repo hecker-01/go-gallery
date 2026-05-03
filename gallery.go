@@ -410,6 +410,18 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 				return
 			}
 
+			for _, pp := range cfg.PostProcessors {
+				if err := pp.OnPrepare(ctx, mi); err != nil {
+					f.Close()
+					os.Remove(destPath)
+					mu.Lock()
+					result.FailedFiles++
+					result.Errors = append(result.Errors, err)
+					mu.Unlock()
+					return
+				}
+			}
+
 			dlErr := dl.Download(ctx, mediaURL, f, cfg)
 			f.Close()
 			if dlErr != nil {
