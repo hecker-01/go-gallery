@@ -177,7 +177,7 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 			return nil, lastRateLimitErr
 		}
 		if resp.StatusCode != http.StatusOK {
-			return nil, galleryerrs.ClassifyHTTPStatus(resp.StatusCode, operation, nil)
+			return nil, galleryerrs.ClassifyHTTPStatus(resp.StatusCode, endpoint, nil)
 		}
 
 		var result map[string]any

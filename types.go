@@ -92,27 +92,27 @@ type MediaInfo struct {
 // and expression filters.
 func (m *MediaInfo) Keywords() map[string]any {
 	return map[string]any{
-		"tweet_id":        m.TweetID,
-		"author.name":     m.Author.Name,
-		"author.id":       m.Author.ID,
+		"tweet_id":           m.TweetID,
+		"author.name":        m.Author.Name,
+		"author.id":          m.Author.ID,
 		"author.screen_name": m.Author.ScreenName,
-		"date":            m.Date,
-		"content":         m.Content,
-		"media_url":       m.MediaURL,
-		"extension":       m.Extension,
-		"num":             m.Num,
-		"count":           m.Count,
-		"favorite_count":  m.FavoriteCount,
-		"retweet_count":   m.RetweetCount,
-		"reply_count":     m.ReplyCount,
-		"quote_count":     m.QuoteCount,
-		"lang":            m.Lang,
-		"hashtags":        m.Hashtags,
-		"mentions":        m.Mentions,
-		"is_retweet":      m.IsRetweet,
-		"is_reply":        m.IsReply,
-		"is_quote":        m.IsQuote,
-		"category":        m.Category,
+		"date":               m.Date,
+		"content":            m.Content,
+		"media_url":          m.MediaURL,
+		"extension":          m.Extension,
+		"num":                m.Num,
+		"count":              m.Count,
+		"favorite_count":     m.FavoriteCount,
+		"retweet_count":      m.RetweetCount,
+		"reply_count":        m.ReplyCount,
+		"quote_count":        m.QuoteCount,
+		"lang":               m.Lang,
+		"hashtags":           m.Hashtags,
+		"mentions":           m.Mentions,
+		"is_retweet":         m.IsRetweet,
+		"is_reply":           m.IsReply,
+		"is_quote":           m.IsQuote,
+		"category":           m.Category,
 	}
 }
 
@@ -120,26 +120,26 @@ func (m *MediaInfo) Keywords() map[string]any {
 // MetadataPostProcessor and GetJSON.
 func (m *MediaInfo) MarshalJSON() ([]byte, error) {
 	type alias struct {
-		TweetID       string            `json:"tweet_id"`
-		Author        AuthorInfo        `json:"author"`
-		Date          string            `json:"date"`
-		Content       string            `json:"content"`
-		MediaURL      string            `json:"media_url"`
-		Extension     string            `json:"extension"`
-		Num           int               `json:"num"`
-		Count         int               `json:"count"`
-		FavoriteCount int               `json:"favorite_count"`
-		RetweetCount  int               `json:"retweet_count"`
-		ReplyCount    int               `json:"reply_count"`
-		QuoteCount    int               `json:"quote_count"`
-		Lang          string            `json:"lang"`
-		Hashtags      []string          `json:"hashtags"`
-		Mentions      []string          `json:"mentions"`
-		IsRetweet     bool              `json:"is_retweet"`
-		IsReply       bool              `json:"is_reply"`
-		IsQuote       bool              `json:"is_quote"`
-		Card          map[string]any    `json:"card,omitempty"`
-		Category      string            `json:"category"`
+		TweetID       string         `json:"tweet_id"`
+		Author        AuthorInfo     `json:"author"`
+		Date          string         `json:"date"`
+		Content       string         `json:"content"`
+		MediaURL      string         `json:"media_url"`
+		Extension     string         `json:"extension"`
+		Num           int            `json:"num"`
+		Count         int            `json:"count"`
+		FavoriteCount int            `json:"favorite_count"`
+		RetweetCount  int            `json:"retweet_count"`
+		ReplyCount    int            `json:"reply_count"`
+		QuoteCount    int            `json:"quote_count"`
+		Lang          string         `json:"lang"`
+		Hashtags      []string       `json:"hashtags"`
+		Mentions      []string       `json:"mentions"`
+		IsRetweet     bool           `json:"is_retweet"`
+		IsReply       bool           `json:"is_reply"`
+		IsQuote       bool           `json:"is_quote"`
+		Card          map[string]any `json:"card,omitempty"`
+		Category      string         `json:"category"`
 	}
 	a := alias{
 		TweetID:       m.TweetID,
@@ -247,7 +247,7 @@ func (r Range) String() string { return r.raw }
 
 // DownloadConfig holds the resolved configuration for a single Download call.
 type DownloadConfig struct {
-	OutputDir      string
+	OutputDir string
 	// FlatDir, when true, strips any directory components from the formatted
 	// filename so files land directly in OutputDir with no subdirectories.
 	// Equivalent to gallery-dl's -D flag.

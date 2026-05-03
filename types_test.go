@@ -45,14 +45,14 @@ func TestMediaInfo_Keywords(t *testing.T) {
 	kw := info.Keywords()
 
 	require := map[string]any{
-		"tweet_id":            "999",
-		"author.screen_name":  "testuser",
-		"author.name":         "Test User",
-		"author.id":           "111",
-		"extension":           "jpg",
-		"num":                 2,
-		"favorite_count":      100,
-		"category":            "twitter",
+		"tweet_id":           "999",
+		"author.screen_name": "testuser",
+		"author.name":        "Test User",
+		"author.id":          "111",
+		"extension":          "jpg",
+		"num":                2,
+		"favorite_count":     100,
+		"category":           "twitter",
 	}
 	for k, want := range require {
 		got, ok := kw[k]

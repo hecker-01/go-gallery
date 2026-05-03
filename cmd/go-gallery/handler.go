@@ -13,10 +13,10 @@ import (
 // ANSI color codes, matching gallery-dl's defaults.
 const (
 	colorReset  = "\033[0m"
-	colorGray   = "\033[0;37m"  // debug
-	colorWhite  = "\033[1;37m"  // info
-	colorYellow = "\033[1;33m"  // warning
-	colorRed    = "\033[1;31m"  // error
+	colorGray   = "\033[0;37m" // debug
+	colorWhite  = "\033[1;37m" // info
+	colorYellow = "\033[1;33m" // warning
+	colorRed    = "\033[1;31m" // error
 )
 
 // levelQuiet is a sentinel level above all real log levels; nothing is emitted.

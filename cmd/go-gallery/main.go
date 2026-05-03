@@ -31,6 +31,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	gallery "github.com/hecker-01/go-gallery"
@@ -40,7 +41,59 @@ func main() {
 	os.Exit(run())
 }
 
+// reorderArgs moves flag tokens before positional arguments so that
+// `go-gallery URL --flag value` works in addition to `go-gallery --flag value URL`.
+// Go's flag package stops parsing at the first non-flag argument; this pre-pass
+// fixes the most common case of users putting flags after URLs.
+func reorderArgs() {
+	args := os.Args[1:]
+
+	// Flags that don't consume a following argument.
+	boolFlags := map[string]bool{
+		"g": true, "j": true, "K": true,
+		"simulate": true,
+		"v":        true, "verbose": true,
+		"q": true, "quiet": true,
+	}
+
+	var flags, positional []string
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			positional = append(positional, a)
+			i++
+			continue
+		}
+		name := strings.TrimLeft(a, "-")
+		// -flag=value is self-contained.
+		if strings.Contains(name, "=") {
+			flags = append(flags, a)
+			i++
+			continue
+		}
+		// Boolean flag: no following value token.
+		if boolFlags[name] {
+			flags = append(flags, a)
+			i++
+			continue
+		}
+		// Value flag: consume the next token as its value.
+		flags = append(flags, a)
+		if i+1 < len(args) {
+			flags = append(flags, args[i+1])
+			i += 2
+		} else {
+			i++
+		}
+	}
+
+	os.Args = append([]string{os.Args[0]}, append(flags, positional...)...)
+}
+
 func run() int {
+	reorderArgs()
+
 	// ── Flags ─────────────────────────────────────────────────────────────────
 	getURLs := flag.Bool("g", false, "print direct media URLs and exit")
 	getJSON := flag.Bool("j", false, "print per-item JSON to stdout and exit")

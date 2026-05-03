@@ -38,11 +38,11 @@ func DefaultCachePath() string {
 
 // SQLiteCache is a persistent cache backed by modernc.org/sqlite.
 type SQLiteCache struct {
-	db     *sql.DB
-	get    *sql.Stmt
-	set    *sql.Stmt
-	del    *sql.Stmt
-	purge  *sql.Stmt
+	db    *sql.DB
+	get   *sql.Stmt
+	set   *sql.Stmt
+	del   *sql.Stmt
+	purge *sql.Stmt
 }
 
 const cacheSchema = `

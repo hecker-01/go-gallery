@@ -47,11 +47,11 @@ func TestFormatter_DefaultPattern(t *testing.T) {
 		t.Fatal(err)
 	}
 	kw := map[string]any{
-		"category":            "twitter",
-		"author.screen_name":  "testuser",
-		"tweet_id":            "111",
-		"num":                 1,
-		"extension":           "jpg",
+		"category":           "twitter",
+		"author.screen_name": "testuser",
+		"tweet_id":           "111",
+		"num":                1,
+		"extension":          "jpg",
 	}
 	got := f.Format(kw)
 	want := "twitter/testuser/111_1.jpg"

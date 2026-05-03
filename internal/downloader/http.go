@@ -27,7 +27,7 @@ type Config struct {
 // size validation, and MIME checking. It satisfies the gallery.Downloader
 // interface when used from the root package.
 type HTTPDownloader struct {
-	client  *http.Client
+	client *http.Client
 }
 
 // New returns an HTTPDownloader using the provided client. If client is nil a

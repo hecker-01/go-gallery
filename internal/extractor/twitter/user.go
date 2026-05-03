@@ -75,8 +75,8 @@ func (e *TwitterUserExtractor) Items(ctx context.Context) <-chan extractor.Item 
 
 func (e *TwitterUserExtractor) resolveUserID(ctx context.Context, screenName string) (string, error) {
 	resp, err := e.graphQL(ctx, "UserByScreenName", map[string]any{
-		"screen_name":            screenName,
-		"withGrokTranslatedBio":  false,
+		"screen_name":           screenName,
+		"withGrokTranslatedBio": false,
 	}, map[string]any{"withAuxiliaryUserLabels": true})
 	if err != nil {
 		return "", fmt.Errorf("resolve user %q: %w", screenName, err)

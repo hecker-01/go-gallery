@@ -53,9 +53,9 @@ func (m *MemoryArchive) Close() error { return nil }
 // It uses a single table with the archive key as the primary key so Has and Put
 // are O(log n) and safe for concurrent access via a single *sql.DB.
 type SQLiteArchive struct {
-	db   *sql.DB
-	has  *sql.Stmt
-	put  *sql.Stmt
+	db  *sql.DB
+	has *sql.Stmt
+	put *sql.Stmt
 }
 
 const archiveSchema = `

@@ -39,22 +39,22 @@ go-gallery [flags] URL...
 
 ### Flags
 
-| Flag                             | Default  | Description                                                                               |
-| -------------------------------- | -------- | ----------------------------------------------------------------------------------------- |
-| `-g`                             |          | Print direct media URLs and exit (no download)                                            |
-| `-j`                             |          | Print per-item JSON to stdout and exit                                                    |
-| `-K`                             |          | Print available template keywords for the first item                                      |
-| `-simulate`                      |          | Run full pipeline but skip all I/O                                                        |
-| `-d DIR`                         | `.`      | Base output directory; `twitter/{username}/…` structure is created beneath it             |
-| `-D DIR`                         |          | Direct output directory; files are placed here with no subdirectory structure             |
-| `-f PATTERN`                     | (config) | Filename template pattern                                                                 |
-| `--concurrency N`                | `4`      | Number of parallel downloads                                                              |
-| `--cookies-from-browser BROWSER` |          | Import cookies from browser (`firefox`)                                                   |
-| `--cookies-from-file PATH`       |          | Import from Netscape `cookies.txt` file                                                   |
-| `--filter EXPR`                  |          | `expr-lang` expression to filter items                                                    |
-| `--config PATH`                  |          | Path to a YAML/TOML/JSON config file                                                      |
-| `-v` / `--verbose`               |          | Enable debug-level logging                                                                |
-| `-q` / `--quiet`                 |          | Suppress all output                                                                       |
+| Flag                             | Default  | Description                                                                   |
+| -------------------------------- | -------- | ----------------------------------------------------------------------------- |
+| `-g`                             |          | Print direct media URLs and exit (no download)                                |
+| `-j`                             |          | Print per-item JSON to stdout and exit                                        |
+| `-K`                             |          | Print available template keywords for the first item                          |
+| `-simulate`                      |          | Run full pipeline but skip all I/O                                            |
+| `-d DIR`                         | `.`      | Base output directory; `twitter/{username}/…` structure is created beneath it |
+| `-D DIR`                         |          | Direct output directory; files are placed here with no subdirectory structure |
+| `-f PATTERN`                     | (config) | Filename template pattern                                                     |
+| `--concurrency N`                | `4`      | Number of parallel downloads                                                  |
+| `--cookies-from-browser BROWSER` |          | Import cookies from browser (`firefox`)                                       |
+| `--cookies-from-file PATH`       |          | Import from Netscape `cookies.txt` file                                       |
+| `--filter EXPR`                  |          | `expr-lang` expression to filter items                                        |
+| `--config PATH`                  |          | Path to a YAML/TOML/JSON config file                                          |
+| `-v` / `--verbose`               |          | Enable debug-level logging                                                    |
+| `-q` / `--quiet`                 |          | Suppress all output                                                           |
 
 **Output format** follows gallery-dl's style — `[source][level] message` with ANSI colors on terminals (auto-detected; set `NO_COLOR=1` to disable):
 
@@ -69,18 +69,18 @@ go-gallery [flags] URL...
 
 The summary line always reports four counters:
 
-| Counter | Meaning |
+| Counter     | Meaning                                         |
 | ----------- | ----------------------------------------------- |
-| downloaded | Files successfully saved to disk |
-| skipped | Archive hits (already downloaded previously) |
-| unavailable | Deleted, DMCA, suspended, geo-blocked items |
-| failed | Network errors, I/O errors, unexpected failures |
+| downloaded  | Files successfully saved to disk                |
+| skipped     | Archive hits (already downloaded previously)    |
+| unavailable | Deleted, DMCA, suspended, geo-blocked items     |
+| failed      | Network errors, I/O errors, unexpected failures |
 
 **Exit code** — exits `0` even when some items were unavailable (matching gallery-dl behaviour). Exits `1` only on a fatal auth/challenge failure, or when zero files downloaded and there were real failures.
 
 > **`-d` vs `-D`** mirrors the convention from [gallery-dl](https://github.com/mikf/gallery-dl):
-> `-d` sets the *base* directory and the tool still creates `twitter/{username}/` beneath it;
-> `-D` sets the *direct* directory and files go there with no further subdirectories.
+> `-d` sets the _base_ directory and the tool still creates `twitter/{username}/` beneath it;
+> `-D` sets the _direct_ directory and files go there with no further subdirectories.
 
 ### Examples
 
@@ -133,21 +133,21 @@ Both `twitter.com` and `x.com` domains are supported.
 
 ## Error Handling & Unavailable Content
 
-go-gallery distinguishes between *permanent unavailability* (content that is gone and won't come back) and *transient failures* (network errors worth retrying).
+go-gallery distinguishes between _permanent unavailability_ (content that is gone and won't come back) and _transient failures_ (network errors worth retrying).
 
 ### Unavailability reasons
 
 When a tweet or media file cannot be retrieved, the reason is reported per-item and counted as `unavailable` in the summary:
 
-| Reason | Cause |
-| ---------------- | ------------------------------------------------------- |
-| `tombstone` | Tweet removed (Twitter shows a placeholder in timeline) |
-| `deleted` | HTTP 404 — content does not exist |
-| `gone` | HTTP 410 — content permanently removed |
-| `dmca` | HTTP 451 — DMCA / legal takedown |
-| `suspended` | Tweet from a suspended account |
-| `policy-violation` | Tweet removed for policy violation |
-| `protected` | Tweet from a protected account you cannot access |
+| Reason             | Cause                                                   |
+| ------------------ | ------------------------------------------------------- |
+| `tombstone`        | Tweet removed (Twitter shows a placeholder in timeline) |
+| `deleted`          | HTTP 404 — content does not exist                       |
+| `gone`             | HTTP 410 — content permanently removed                  |
+| `dmca`             | HTTP 451 — DMCA / legal takedown                        |
+| `suspended`        | Tweet from a suspended account                          |
+| `policy-violation` | Tweet removed for policy violation                      |
+| `protected`        | Tweet from a protected account you cannot access        |
 
 ### Rate limiting
 
