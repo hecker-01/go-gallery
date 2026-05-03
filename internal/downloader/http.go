@@ -51,7 +51,7 @@ func (d *HTTPDownloader) DownloadToFile(ctx context.Context, url, destPath strin
 	var lastErr error
 	for attempt := 0; attempt <= retries; attempt++ {
 		if attempt > 0 {
-			// Exponential backoff: 1s, 2s, 4s …
+			// Exponential backoff: 1s, 2s, 4s ...
 			backoff := time.Duration(1<<(attempt-1)) * time.Second
 			select {
 			case <-ctx.Done():
@@ -96,7 +96,7 @@ func (d *HTTPDownloader) attemptDownload(ctx context.Context, url, destPath, par
 	}
 	defer resp.Body.Close()
 
-	// 416 Range Not Satisfiable — the part file is already complete.
+	// 416 Range Not Satisfiable - the part file is already complete.
 	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
 		return os.Rename(partPath, destPath)
 	}
@@ -116,7 +116,7 @@ func (d *HTTPDownloader) attemptDownload(ctx context.Context, url, destPath, par
 		}
 	}
 
-	// Open the .part file — append if resuming, create/truncate otherwise.
+	// Open the .part file - append if resuming, create/truncate otherwise.
 	flag := os.O_CREATE | os.O_WRONLY
 	if resp.StatusCode == http.StatusPartialContent {
 		flag |= os.O_APPEND
@@ -217,7 +217,7 @@ func isTransient(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Permanent client-side errors — never retry these.
+	// Permanent client-side errors - never retry these.
 	var nfe *galleryerrs.NotFoundError
 	if errors.As(err, &nfe) {
 		return false

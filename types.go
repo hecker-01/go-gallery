@@ -45,12 +45,12 @@ type Queue struct {
 
 func (Queue) isMessage() {}
 
-// Skipped signals that an item was identified but cannot be retrieved —
+// Skipped signals that an item was identified but cannot be retrieved -
 // deleted, DMCA-blocked, from a suspended account, geo-restricted, etc.
 // The run continues; the item is counted in Result.UnavailableFiles.
 type Skipped struct {
 	TweetID string
-	Reason  string // "tombstone" | "deleted" | "suspended" | "dmca" | …
+	Reason  string // "tombstone" | "deleted" | "suspended" | "dmca" | ...
 	Cause   error  // typed error if available (e.g. *NotFoundError)
 }
 
@@ -273,7 +273,7 @@ func WithOutputDir(dir string) DownloadOption {
 	return func(c *DownloadConfig) { c.OutputDir = dir }
 }
 
-// WithFlatDir disables subdirectory creation — files are placed directly in
+// WithFlatDir disables subdirectory creation - files are placed directly in
 // OutputDir regardless of the filename format's directory components.
 // Equivalent to gallery-dl's -D flag.
 func WithFlatDir() DownloadOption {

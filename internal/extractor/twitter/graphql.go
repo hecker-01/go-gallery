@@ -446,6 +446,25 @@ func findTimelineInstructions(resp map[string]any) ([]any, error) {
 	return nil, fmt.Errorf("could not locate timeline instructions in response")
 }
 
+// extractTimelineItems walks a Twitter timeline instructions array and returns
+// all media items and the next pagination cursor. It handles three instruction
+// shapes that Twitter uses depending on the endpoint and page number:
+//
+//  1. type="TimelineAddEntries" - standard format; entries contain individual
+//     tweet items or TimelineTimelineModule groups.
+//
+//  2. Inline module (field "moduleEntryId" present, no "type") - used by
+//     UserMedia on page 2+; the instruction itself is the module and carries
+//     tweet items directly in "moduleItems".
+//
+//  3. type="TimelineAddToModule" - continuation of an existing media grid module;
+//     also carries items in "moduleItems".
+//
+// Cursors for the next page arrive either as cursor-bottom entries inside
+// TimelineAddEntries, or as cursor-bottom items inside moduleItems.
+//
+// type="TimelineTerminateTimeline" with direction="Bottom" signals the end of
+// the timeline; the cursor is cleared so pagination stops cleanly.
 func extractTimelineItems(instructions []any) ([]extractor.Item, string, error) {
 	var items []extractor.Item
 	var nextCursor string
@@ -559,6 +578,9 @@ func extractTimelineItems(instructions []any) ([]extractor.Item, string, error) 
 	return items, nextCursor, nil
 }
 
+// extractCursorFromEntry reads the pagination cursor value from a timeline
+// entry. It tries entry.content.value first (TimelineTimelineCursor shape),
+// then entry.content.itemContent.value (older cursor shape).
 func extractCursorFromEntry(entry map[string]any) string {
 	content, _ := entry["content"].(map[string]any)
 	if content == nil {
@@ -577,6 +599,9 @@ func extractCursorFromEntry(entry map[string]any) string {
 	return ""
 }
 
+// entryToItems converts a single TimelineAddEntries entry to extractor Items.
+// Handles TimelineTimelineItem (single tweet) and TimelineTimelineModule
+// (tweet group / media grid row) content types.
 func entryToItems(entry map[string]any) []extractor.Item {
 	entryID, _ := entry["entryId"].(string)
 	content, ok := entry["content"].(map[string]any)
@@ -608,6 +633,9 @@ func entryToItems(entry map[string]any) []extractor.Item {
 	return nil
 }
 
+// itemContentToItems extracts items from a TimelineTweet itemContent object.
+// Only TimelineTweet itemType is processed; all other content types (ads,
+// promoted content, etc.) are silently ignored.
 func itemContentToItems(ic map[string]any, entryID string) []extractor.Item {
 	if ic == nil {
 		return nil
@@ -625,14 +653,25 @@ func itemContentToItems(ic map[string]any, entryID string) []extractor.Item {
 }
 
 // tweetResultToItems converts a raw tweet result map to extractor Items.
+//
+// num and count control media item numbering. Pass 0 for both when called from
+// timeline pagination - items will be numbered 1…len(media) automatically.
+// Pass explicit values only for direct single-tweet lookups (TweetDetail).
+//
 // entryID is the timeline entryId (e.g. "tweet-1234567890") used to populate
-// SkipTweetID when a tombstone is encountered; pass "" for direct-tweet lookups.
+// SkipTweetID when a tombstone or unavailable tweet is encountered; pass "" for
+// direct-tweet lookups.
+//
+// Per-media availability is checked via ext_media_availability before emitting
+// a download item. Media marked with a non-"Available" status (e.g. DMCA
+// takedowns reported as reason="Dmcaed") emits a KindSkipped item instead so
+// the caller can log and count it without attempting a download.
 func tweetResultToItems(result any, num, count int, entryID string) []extractor.Item {
 	r, ok := result.(map[string]any)
 	if !ok {
 		return nil
 	}
-	// Handle tweet tombstone — emit a KindSkipped item instead of silently dropping.
+	// Handle tweet tombstone - emit a KindSkipped item instead of silently dropping.
 	typename, _ := r["__typename"].(string)
 	if typename == "TweetTombstone" {
 		reason := "tombstone"
@@ -702,7 +741,7 @@ func tweetResultToItems(result any, num, count int, entryID string) []extractor.
 	isReply := strOrEmpty(legacy["in_reply_to_status_id_str"]) != ""
 	isQuote := boolOrFalse(legacy["is_quote_status"])
 
-	// Author — try multiple paths used by different API response shapes:
+	// Author - try multiple paths used by different API response shapes:
 	// 1. Classic: r["core"]["user_results"]["result"]["legacy"]
 	// 2. New 2025: r["core"]["user_results"]["result"]["core"] for screen_name/name
 	// 3. New:     r["author"]["core"]["screen_name"] (gallery-dl 2025 format)

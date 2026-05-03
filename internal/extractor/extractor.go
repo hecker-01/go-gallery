@@ -78,7 +78,7 @@ type Item struct {
 	QueueURL string
 
 	// KindSkipped
-	SkipReason  string // "tombstone" | "deleted" | "suspended" | "dmca" | …
+	SkipReason  string // "tombstone" | "deleted" | "suspended" | "dmca" | ...
 	SkipTweetID string
 }
 

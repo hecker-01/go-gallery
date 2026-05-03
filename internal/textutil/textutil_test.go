@@ -8,11 +8,11 @@ func TestTruncate(t *testing.T) {
 		max       int
 		want      string
 	}{
-		{"hello world", "…", 5, "hell…"},
-		{"hello", "…", 10, "hello"},
+		{"hello world", "...", 5, "hell..."},
+		{"hello", "...", 10, "hello"},
 		{"hello world", "...", 8, "hello..."},
-		{"", "…", 5, ""},
-		{"abc", "…", 3, "abc"},
+		{"", "...", 5, ""},
+		{"abc", "...", 3, "abc"},
 	}
 	for _, tt := range tests {
 		got := Truncate(tt.s, tt.suffix, tt.max)

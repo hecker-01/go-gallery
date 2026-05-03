@@ -31,6 +31,14 @@ func newUserExtractor(rawURL string, params extractor.ClientParams) extractor.Ex
 func (e *TwitterUserExtractor) Name() string     { return "twitter:user" }
 func (e *TwitterUserExtractor) Category() string { return "twitter" }
 
+// Items resolves the user's numeric ID, emits a KindDirectory item, then
+// paginates the UserMedia timeline and emits one KindMedia (or KindSkipped)
+// item per piece of media.
+//
+// UserMedia is always used regardless of whether the source URL included the
+// /media path segment. This ensures server-side filtering to media-only tweets,
+// which is more efficient than fetching all tweets (UserTweets) and discarding
+// the text-only ones client-side.
 func (e *TwitterUserExtractor) Items(ctx context.Context) <-chan extractor.Item {
 	out := make(chan extractor.Item)
 	go func() {
@@ -123,7 +131,8 @@ func (e *TwitterUserExtractor) fetchUserPage(ctx context.Context, userID, operat
 		e.Params.Logger.Debug(fmt.Sprintf("%s page: cursor_in=%s → %d items, cursor_out=%s",
 			operation, cursorInStr, len(items), cursorOutStr))
 	}
-	// Backfill screen name from URL when the API response omits it.
+	// Backfill screen name from URL when the API omits it. The moduleItems
+	// format (page 2+ of UserMedia) sometimes omits author.core.screen_name.
 	for i := range items {
 		if items[i].Meta != nil && items[i].Meta.Author.ScreenName == "" {
 			items[i].Meta.Author.ScreenName = e.screenName

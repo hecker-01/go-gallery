@@ -84,7 +84,7 @@ func (b *base) ensureGuestToken(ctx context.Context) error {
 
 	guestWarnOnce.Do(func() {
 		if b.Params.Logger != nil {
-			b.Params.Logger.Warn("twitter: running in guest mode — Twitter rate limits are very low. Use --cookies-from-browser firefox or --cookies-from-file to authenticate.")
+			b.Params.Logger.Warn("twitter: running in guest mode - Twitter rate limits are very low. Use --cookies-from-browser firefox or --cookies-from-file to authenticate.")
 		}
 	})
 
@@ -193,7 +193,7 @@ func (b *base) authHeaders() map[string]string {
 		}
 	}
 
-	// Always send x-csrf-token — Twitter silently returns {"data":{}}
+	// Always send x-csrf-token - Twitter silently returns {"data":{}}
 	// when this header is missing, even for unauthenticated GraphQL calls.
 	h["x-csrf-token"] = csrfToken
 	return h

@@ -508,7 +508,7 @@ func (c *Client) GetKeywords(ctx context.Context, url string) (map[string]any, e
 	return nil, &InputError{Message: "no media items found for URL: " + url}
 }
 
-// GetJSON returns a channel of json.RawMessage — one per tweet's full metadata
+// GetJSON returns a channel of json.RawMessage - one per tweet's full metadata
 // object. Equivalent to the -j flag.
 func (c *Client) GetJSON(ctx context.Context, url string) (<-chan json.RawMessage, <-chan error) {
 	out := make(chan json.RawMessage)

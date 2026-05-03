@@ -197,7 +197,7 @@ func TestPaginate_StopsOnCtxCancelled(t *testing.T) {
 		select {
 		case _, ok := <-ch:
 			if !ok {
-				return // channel closed — pass
+				return // channel closed - pass
 			}
 		case <-deadline:
 			t.Fatal("paginator did not stop after ctx cancellation")

@@ -10,7 +10,7 @@
 //	-j                    Print per-item JSON and exit (GetJSON mode)
 //	-K                    Print template keywords for first item and exit
 //	--simulate            Run extraction and filtering but skip all I/O
-//	-d DIR                Base output directory (default: current directory); {category}/{username}/… structure is created beneath it
+//	-d DIR                Base output directory (default: current directory); {category}/{username}/... structure is created beneath it
 //	-D DIR                Direct output directory; files are placed here with no subdirectory structure
 //	-f PATTERN            Filename formatter pattern
 //	--concurrency N       Number of parallel downloads (default: 4)
@@ -54,8 +54,8 @@ func reorderArgs() {
 		"g": true, "j": true, "K": true,
 		"simulate": true,
 		"v":        true, "verbose": true,
-		"q":        true, "quiet": true,
-		"debug":    true,
+		"q": true, "quiet": true,
+		"debug": true,
 	}
 
 	var flags, positional []string
@@ -107,7 +107,7 @@ func run() int {
 	flag.BoolVar(&isQuiet, "q", false, "suppress all output")
 	flag.BoolVar(&isQuiet, "quiet", false, "suppress all output")
 	flag.BoolVar(&isDebug, "debug", false, "enable debug-level logging and trace all program activity")
-	baseDir := flag.String("d", ".", "base output directory; {category}/{username}/… structure is created beneath it")
+	baseDir := flag.String("d", ".", "base output directory; {category}/{username}/... structure is created beneath it")
 	directDir := flag.String("D", "", "direct output directory; files are placed here with no subdirectory structure")
 	filenameFormat := flag.String("f", "", "filename formatter pattern (overrides config)")
 	concurrency := flag.Int("concurrency", 4, "number of parallel downloads")
@@ -327,7 +327,7 @@ func runDownload(ctx context.Context, client *gallery.Client, rawURL string, opt
 	}
 
 	// Exit 1 only when nothing downloaded AND there were actual failures
-	// (not just unavailables — those are expected and exit 0 per gallery-dl behaviour).
+	// (not just unavailables - those are expected and exit 0 per gallery-dl behaviour).
 	if result.TotalFiles == 0 && result.FailedFiles > 0 {
 		return fmt.Errorf("%d download(s) failed, none succeeded", result.FailedFiles)
 	}
