@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hecker-01/go-gallery/internal/extractor"
+	"github.com/hecker-01/go-gallery/internal/galleryerrs"
 )
 
 const maxRateLimitRetries = 3
@@ -117,7 +118,7 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 		return nil, fmt.Errorf("twitter graphql %s: marshal variables: %w", operation, err)
 	}
 
-	endpoint := fmt.Sprintf("https://x.com/i/api/graphql/%s/%s", qid, operation)
+	endpoint := fmt.Sprintf("%s/i/api/graphql/%s/%s", b.endpointBase, qid, operation)
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return nil, err
@@ -145,22 +146,22 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 		}
 		defer resp.Body.Close()
 
-		if resp.StatusCode == 401 {
-			return nil, &authErr{msg: "authentication required for " + operation}
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, &galleryerrs.AuthenticationError{}
 		}
-		if resp.StatusCode == 403 {
-			return nil, &authErr{msg: "not authorized for " + operation}
+		if resp.StatusCode == http.StatusForbidden {
+			return nil, &galleryerrs.AuthorizationError{URL: operation}
 		}
-		if resp.StatusCode == 429 {
+		if resp.StatusCode == http.StatusTooManyRequests {
 			resetAt := parseRateLimitReset(resp)
 			if b.Params.RateLimitCB != nil {
 				b.Params.RateLimitCB(operation, resetAt)
 			}
-			lastRateLimitErr = &rateLimitErr{endpoint: operation, resetAt: resetAt}
+			lastRateLimitErr = &galleryerrs.RateLimitError{Endpoint: operation, ResetAt: resetAt}
 			if attempt < maxRateLimitRetries {
 				waitDur := time.Until(resetAt)
-				if waitDur < time.Second {
-					waitDur = time.Second
+				if waitDur < 10*time.Second {
+					waitDur = 10 * time.Second
 				}
 				if b.Params.Logger != nil {
 					b.Params.Logger.Info(fmt.Sprintf("rate limited on %s; waiting %s (resets at %s)",
@@ -175,8 +176,8 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 			}
 			return nil, lastRateLimitErr
 		}
-		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("twitter graphql %s: HTTP %d", operation, resp.StatusCode)
+		if resp.StatusCode != http.StatusOK {
+			return nil, galleryerrs.ClassifyHTTPStatus(resp.StatusCode, operation, nil)
 		}
 
 		var result map[string]any
@@ -221,7 +222,8 @@ func (b *base) queryID(ctx context.Context, operation string) string {
 }
 
 // parseRateLimitReset reads the x-rate-limit-reset header and returns the
-// corresponding time. Falls back to 15 minutes from now.
+// corresponding time plus a 10-second buffer for clock skew.
+// Falls back to 15 minutes from now.
 func parseRateLimitReset(resp *http.Response) time.Time {
 	if resp == nil {
 		return time.Now().Add(15 * time.Minute)
@@ -231,36 +233,37 @@ func parseRateLimitReset(resp *http.Response) time.Time {
 		var unix int64
 		fmt.Sscanf(v, "%d", &unix)
 		if unix > 0 {
-			return time.Unix(unix, 0)
+			return time.Unix(unix, 0).Add(10 * time.Second)
 		}
 	}
 	return time.Now().Add(15 * time.Minute)
 }
 
-// ─── Typed errors ────────────────────────────────────────────────────────────
-
-type authErr struct{ msg string }
-
-func (e *authErr) Error() string { return e.msg }
-
-type rateLimitErr struct {
-	endpoint string
-	resetAt  time.Time
-}
-
-func (e *rateLimitErr) Error() string {
-	return fmt.Sprintf("rate limit on %s, resets at %s", e.endpoint, e.resetAt.UTC().Format(time.RFC3339))
-}
-
 // ─── Response parsers ─────────────────────────────────────────────────────────
 
-// parseUserID extracts the numeric user ID from a UserByScreenName response.
+// parseUserID extracts the numeric user ID from a UserByScreenName response,
+// mapping known Twitter API error codes to typed errors.
 func parseUserID(resp map[string]any) (string, error) {
-	// Check for top-level API errors first.
+	// Check for top-level API errors first, mapping known codes to typed errors.
 	if errs, ok := resp["errors"].([]any); ok && len(errs) > 0 {
 		if first, ok := errs[0].(map[string]any); ok {
-			if msg, ok := first["message"].(string); ok {
-				return "", fmt.Errorf("UserByScreenName API error: %s", msg)
+			code := int(intOrZero(first["code"]))
+			msg, _ := first["message"].(string)
+			switch code {
+			case 50, 63: // User not found / suspended
+				return "", &galleryerrs.NotFoundError{Reason: "suspended", URL: msg}
+			case 144: // No status with that ID
+				return "", &galleryerrs.NotFoundError{Reason: "deleted", URL: msg}
+			case 32: // Could not authenticate
+				return "", &galleryerrs.AuthenticationError{}
+			case 220: // Your credentials do not allow access
+				return "", &galleryerrs.AuthorizationError{URL: msg}
+			case 88: // Rate limit exceeded
+				return "", &galleryerrs.RateLimitError{Endpoint: "UserByScreenName"}
+			default:
+				if msg != "" {
+					return "", fmt.Errorf("UserByScreenName API error (code %d): %s", code, msg)
+				}
 			}
 		}
 	}
@@ -353,7 +356,7 @@ func parseTweetDetail(resp map[string]any) ([]extractor.Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	items := tweetResultToItems(res, 1, 1)
+	items := tweetResultToItems(res, 1, 1, "")
 	return items, nil
 }
 
@@ -438,6 +441,7 @@ func extractCursorFromEntry(entry map[string]any) string {
 }
 
 func entryToItems(entry map[string]any) []extractor.Item {
+	entryID, _ := entry["entryId"].(string)
 	content, ok := entry["content"].(map[string]any)
 	if !ok {
 		return nil
@@ -446,7 +450,7 @@ func entryToItems(entry map[string]any) []extractor.Item {
 	switch contentType {
 	case "TimelineTimelineItem":
 		ic, _ := content["itemContent"].(map[string]any)
-		return itemContentToItems(ic)
+		return itemContentToItems(ic, entryID)
 	case "TimelineTimelineModule":
 		items2, _ := content["items"].([]any)
 		var out []extractor.Item
@@ -460,14 +464,14 @@ func entryToItems(entry map[string]any) []extractor.Item {
 				continue
 			}
 			ic3, _ := ic2["itemContent"].(map[string]any)
-			out = append(out, itemContentToItems(ic3)...)
+			out = append(out, itemContentToItems(ic3, entryID)...)
 		}
 		return out
 	}
 	return nil
 }
 
-func itemContentToItems(ic map[string]any) []extractor.Item {
+func itemContentToItems(ic map[string]any, entryID string) []extractor.Item {
 	if ic == nil {
 		return nil
 	}
@@ -480,24 +484,50 @@ func itemContentToItems(ic map[string]any) []extractor.Item {
 		return nil
 	}
 	result, _ := tweetResult["result"].(map[string]any)
-	return tweetResultToItems(result, 0, 0)
+	return tweetResultToItems(result, 0, 0, entryID)
 }
 
-func tweetResultToItems(result any, num, count int) []extractor.Item {
+// tweetResultToItems converts a raw tweet result map to extractor Items.
+// entryID is the timeline entryId (e.g. "tweet-1234567890") used to populate
+// SkipTweetID when a tombstone is encountered; pass "" for direct-tweet lookups.
+func tweetResultToItems(result any, num, count int, entryID string) []extractor.Item {
 	r, ok := result.(map[string]any)
 	if !ok {
 		return nil
 	}
-	// Handle tweet tombstone / protected tweet
+	// Handle tweet tombstone — emit a KindSkipped item instead of silently dropping.
 	typename, _ := r["__typename"].(string)
 	if typename == "TweetTombstone" {
-		return nil
+		reason := "tombstone"
+		// Extract tombstone text for a more specific reason string.
+		if ts, _ := r["tombstone"].(map[string]any); ts != nil {
+			if textObj, _ := ts["text"].(map[string]any); textObj != nil {
+				if txt, _ := textObj["text"].(string); txt != "" {
+					lower := strings.ToLower(txt)
+					switch {
+					case strings.Contains(lower, "suspended"):
+						reason = "suspended"
+					case strings.Contains(lower, "violat"):
+						reason = "policy-violation"
+					case strings.Contains(lower, "unavailable"):
+						reason = "tombstone"
+					}
+				}
+			}
+		}
+		// Best-effort tweet ID: strip the "tweet-" prefix from the entry ID.
+		tweetID := strings.TrimPrefix(entryID, "tweet-")
+		return []extractor.Item{{
+			Kind:        extractor.KindSkipped,
+			SkipReason:  reason,
+			SkipTweetID: tweetID,
+		}}
 	}
 	// Unwrap TweetWithVisibilityResults
 	if typename == "TweetWithVisibilityResults" {
 		inner, _ := r["tweet"].(map[string]any)
 		if inner != nil {
-			return tweetResultToItems(inner, num, count)
+			return tweetResultToItems(inner, num, count, entryID)
 		}
 	}
 
@@ -568,16 +598,6 @@ func tweetResultToItems(result any, num, count int) []extractor.Item {
 				}
 			}
 		}
-	}
-	// Debug: log top-level tweet result keys when author is still unresolved.
-	if authorMeta.ScreenName == "" && tweetID != "" {
-		keys := make([]string, 0, len(r))
-		for k := range r {
-			keys = append(keys, k)
-		}
-		// Log at debug level so it appears with --verbose.
-		// We can't use b.Params.Logger here (no access), but the caller can.
-		_ = keys
 	}
 
 	// Hashtags and mentions

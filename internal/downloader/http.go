@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"github.com/hecker-01/go-gallery/internal/galleryerrs"
 )
 
 // Config carries the per-download options forwarded from DownloadConfig.
@@ -100,7 +102,7 @@ func (d *HTTPDownloader) attemptDownload(ctx context.Context, url, destPath, par
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return fmt.Errorf("HTTP %d for %s", resp.StatusCode, url)
+		return galleryerrs.ClassifyHTTPStatus(resp.StatusCode, url, nil)
 	}
 
 	// Size validation using Content-Length (pre-download).
@@ -210,11 +212,25 @@ func (d *HTTPDownloader) ContentLength(ctx context.Context, url string) (int64, 
 }
 
 // isTransient reports whether err should trigger a retry.
+// Permanent failures (404, 403, 410, 451, 401) are not retried.
 func isTransient(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Network-level errors and 5xx-ish HTTP errors.
+	// Permanent client-side errors — never retry these.
+	var nfe *galleryerrs.NotFoundError
+	if errors.As(err, &nfe) {
+		return false
+	}
+	var authzErr *galleryerrs.AuthorizationError
+	if errors.As(err, &authzErr) {
+		return false
+	}
+	var authnErr *galleryerrs.AuthenticationError
+	if errors.As(err, &authnErr) {
+		return false
+	}
+	// Network-level errors that implement Temporary() are transient.
 	var e interface{ Temporary() bool }
 	if errors.As(err, &e) && e.Temporary() {
 		return true

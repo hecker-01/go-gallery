@@ -25,6 +25,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -205,10 +206,44 @@ func runGetJSON(ctx context.Context, client *gallery.Client, rawURL string, logg
 
 func runDownload(ctx context.Context, client *gallery.Client, rawURL string, opts []gallery.DownloadOption, logger *slog.Logger) error {
 	result, err := client.Download(ctx, rawURL, opts...)
-	logger.Info(fmt.Sprintf("%d downloaded, %d skipped, %d failed (%s)",
-		result.TotalFiles, result.SkippedFiles, result.FailedFiles, result.Duration))
+
+	logger.Info(fmt.Sprintf("%d downloaded, %d skipped, %d unavailable, %d failed (%s)",
+		result.TotalFiles, result.SkippedFiles, result.UnavailableFiles, result.FailedFiles, result.Duration))
+
+	// Print per-item details grouped by category.
+	var unavailErrs, failedErrs []error
 	for _, e := range result.Errors {
-		logger.Warn(fmt.Sprintf("%v", e))
+		var nfe *gallery.NotFoundError
+		var authzErr *gallery.AuthorizationError
+		if errors.As(e, &nfe) || errors.As(e, &authzErr) {
+			unavailErrs = append(unavailErrs, e)
+		} else {
+			failedErrs = append(failedErrs, e)
+		}
 	}
-	return err
+	if len(unavailErrs) > 0 {
+		logger.Warn("unavailable:")
+		for _, e := range unavailErrs {
+			logger.Warn("  " + e.Error())
+		}
+	}
+	if len(failedErrs) > 0 {
+		logger.Warn("failed:")
+		for _, e := range failedErrs {
+			logger.Warn("  " + e.Error())
+		}
+	}
+
+	// Fatal extraction error (auth failure, challenge, network abort).
+	if err != nil {
+		return err
+	}
+
+	// Exit 1 only when nothing downloaded AND there were actual failures
+	// (not just unavailables — those are expected and exit 0 per gallery-dl behaviour).
+	if result.TotalFiles == 0 && result.FailedFiles > 0 {
+		return fmt.Errorf("%d download(s) failed, none succeeded", result.FailedFiles)
+	}
+
+	return nil
 }

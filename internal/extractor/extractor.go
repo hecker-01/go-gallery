@@ -17,13 +17,14 @@ import (
 
 // ─── Item types ─────────────────────────────────────────────────────────────
 
-// ItemKind discriminates the three message variants.
+// ItemKind discriminates the message variants.
 type ItemKind uint8
 
 const (
 	KindDirectory ItemKind = iota
 	KindMedia
 	KindQueue
+	KindSkipped // item was identified but permanently unavailable
 )
 
 // AuthorMeta holds the Twitter user fields embedded in every ItemMeta.
@@ -73,6 +74,10 @@ type Item struct {
 
 	// KindQueue
 	QueueURL string
+
+	// KindSkipped
+	SkipReason  string // "tombstone" | "deleted" | "suspended" | "dmca" | …
+	SkipTweetID string
 }
 
 // ─── Client params ───────────────────────────────────────────────────────────

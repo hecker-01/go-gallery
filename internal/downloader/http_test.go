@@ -2,6 +2,7 @@ package downloader
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/hecker-01/go-gallery/internal/galleryerrs"
 )
 
 func serveJPEG(t *testing.T, data []byte) *httptest.Server {
@@ -71,6 +74,90 @@ func TestHTTPDownloader_HTTP404(t *testing.T) {
 	err := d.DownloadToFile(context.Background(), srv.URL, dest, Config{Retries: 0})
 	if err == nil {
 		t.Error("expected error for HTTP 404, got nil")
+	}
+	var nfe *galleryerrs.NotFoundError
+	if !errors.As(err, &nfe) {
+		t.Errorf("expected *NotFoundError for 404, got %T: %v", err, err)
+	}
+	if nfe.Reason != "deleted" {
+		t.Errorf("Reason = %q, want %q", nfe.Reason, "deleted")
+	}
+}
+
+func TestHTTPDownloader_HTTP403(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	d := New(srv.Client())
+	dest := filepath.Join(t.TempDir(), "out.jpg")
+	err := d.DownloadToFile(context.Background(), srv.URL, dest, Config{Retries: 0})
+	if err == nil {
+		t.Error("expected error for HTTP 403, got nil")
+	}
+	var authzErr *galleryerrs.AuthorizationError
+	if !errors.As(err, &authzErr) {
+		t.Errorf("expected *AuthorizationError for 403, got %T: %v", err, err)
+	}
+}
+
+func TestHTTPDownloader_HTTP410(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusGone)
+	}))
+	defer srv.Close()
+
+	d := New(srv.Client())
+	dest := filepath.Join(t.TempDir(), "out.jpg")
+	err := d.DownloadToFile(context.Background(), srv.URL, dest, Config{Retries: 0})
+	if err == nil {
+		t.Error("expected error for HTTP 410, got nil")
+	}
+	var nfe *galleryerrs.NotFoundError
+	if !errors.As(err, &nfe) {
+		t.Errorf("expected *NotFoundError for 410, got %T: %v", err, err)
+	}
+	if nfe.Reason != "gone" {
+		t.Errorf("Reason = %q, want %q", nfe.Reason, "gone")
+	}
+}
+
+func TestHTTPDownloader_HTTP451(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnavailableForLegalReasons)
+	}))
+	defer srv.Close()
+
+	d := New(srv.Client())
+	dest := filepath.Join(t.TempDir(), "out.jpg")
+	err := d.DownloadToFile(context.Background(), srv.URL, dest, Config{Retries: 0})
+	if err == nil {
+		t.Error("expected error for HTTP 451, got nil")
+	}
+	var nfe *galleryerrs.NotFoundError
+	if !errors.As(err, &nfe) {
+		t.Errorf("expected *NotFoundError for 451, got %T: %v", err, err)
+	}
+	if nfe.Reason != "dmca" {
+		t.Errorf("Reason = %q, want %q", nfe.Reason, "dmca")
+	}
+}
+
+func TestHTTPDownloader_HTTP404_NoRetry(t *testing.T) {
+	var callCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	d := New(srv.Client())
+	dest := filepath.Join(t.TempDir(), "out.jpg")
+	// With retries=3, a 404 should NOT retry because isTransient returns false.
+	_ = d.DownloadToFile(context.Background(), srv.URL, dest, Config{Retries: 3})
+	if callCount != 1 {
+		t.Errorf("expected exactly 1 request for 404 (no retry), got %d", callCount)
 	}
 }
 

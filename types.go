@@ -45,6 +45,17 @@ type Queue struct {
 
 func (Queue) isMessage() {}
 
+// Skipped signals that an item was identified but cannot be retrieved —
+// deleted, DMCA-blocked, from a suspended account, geo-restricted, etc.
+// The run continues; the item is counted in Result.UnavailableFiles.
+type Skipped struct {
+	TweetID string
+	Reason  string // "tombstone" | "deleted" | "suspended" | "dmca" | …
+	Cause   error  // typed error if available (e.g. *NotFoundError)
+}
+
+func (Skipped) isMessage() {}
+
 // AuthorInfo holds Twitter user fields embedded in MediaInfo.
 type AuthorInfo struct {
 	ID         string
@@ -163,11 +174,12 @@ func (m *MediaInfo) MarshalJSON() ([]byte, error) {
 
 // Result is returned by Client.Download summarising the completed operation.
 type Result struct {
-	TotalFiles   int
-	SkippedFiles int // archive hits
-	FailedFiles  int
-	Errors       []error
-	Duration     time.Duration
+	TotalFiles       int
+	SkippedFiles     int // archive hits
+	FailedFiles      int
+	UnavailableFiles int // deleted, DMCA, suspended, tombstone, etc.
+	Errors           []error
+	Duration         time.Duration
 }
 
 // Range selects a subset of items by 1-based index (e.g. "1-5,7,10-20").
