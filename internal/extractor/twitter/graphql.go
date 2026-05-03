@@ -449,13 +449,51 @@ func findTimelineInstructions(resp map[string]any) ([]any, error) {
 func extractTimelineItems(instructions []any) ([]extractor.Item, string, error) {
 	var items []extractor.Item
 	var nextCursor string
+	terminated := false
 
 	for _, instrAny := range instructions {
 		instr, ok := instrAny.(map[string]any)
 		if !ok {
 			continue
 		}
+
+		// Page 2+ format for UserMedia: instruction is a module inline with
+		// moduleEntryId + moduleItems, no "type" wrapper.
+		if _, hasModule := instr["moduleEntryId"]; hasModule {
+			moduleItems, _ := instr["moduleItems"].([]any)
+			for _, miAny := range moduleItems {
+				mi, ok := miAny.(map[string]any)
+				if !ok {
+					continue
+				}
+				entryID, _ := mi["entryId"].(string)
+				item, _ := mi["item"].(map[string]any)
+				if item == nil {
+					continue
+				}
+				ic, _ := item["itemContent"].(map[string]any)
+				if strings.HasPrefix(entryID, "cursor-bottom") || strings.Contains(entryID, "-cursor-bottom") {
+					if ic != nil {
+						if v, _ := ic["value"].(string); v != "" {
+							nextCursor = v
+						}
+					}
+					continue
+				}
+				if strings.HasPrefix(entryID, "cursor-") {
+					continue
+				}
+				newItems := itemContentToItems(ic, entryID)
+				items = append(items, newItems...)
+			}
+			continue
+		}
+
 		switch instr["type"] {
+		case "TimelineTerminateTimeline":
+			if dir, _ := instr["direction"].(string); dir == "Bottom" {
+				terminated = true
+			}
 		case "TimelineAddEntries":
 			entries, _ := instr["entries"].([]any)
 			for _, entryAny := range entries {
@@ -476,6 +514,33 @@ func extractTimelineItems(instructions []any) ([]extractor.Item, string, error) 
 				newItems := entryToItems(entry)
 				items = append(items, newItems...)
 			}
+		case "TimelineAddToModule":
+			moduleItems, _ := instr["moduleItems"].([]any)
+			for _, miAny := range moduleItems {
+				mi, ok := miAny.(map[string]any)
+				if !ok {
+					continue
+				}
+				entryID, _ := mi["entryId"].(string)
+				item, _ := mi["item"].(map[string]any)
+				if item == nil {
+					continue
+				}
+				ic, _ := item["itemContent"].(map[string]any)
+				if strings.HasPrefix(entryID, "cursor-bottom") || strings.Contains(entryID, "-cursor-bottom") {
+					if ic != nil {
+						if v, _ := ic["value"].(string); v != "" {
+							nextCursor = v
+						}
+					}
+					continue
+				}
+				if strings.HasPrefix(entryID, "cursor-") {
+					continue
+				}
+				newItems := itemContentToItems(ic, entryID)
+				items = append(items, newItems...)
+			}
 		case "TimelineReplaceEntry":
 			entry, _ := instr["entry"].(map[string]any)
 			if entry != nil {
@@ -487,6 +552,9 @@ func extractTimelineItems(instructions []any) ([]extractor.Item, string, error) 
 				}
 			}
 		}
+	}
+	if terminated {
+		nextCursor = ""
 	}
 	return items, nextCursor, nil
 }
@@ -732,6 +800,26 @@ func tweetResultToItems(result any, num, count int, entryID string) []extractor.
 		m, ok := mAny.(map[string]any)
 		if !ok {
 			continue
+		}
+		// Skip media that Twitter has marked unavailable (DMCA, geo-block, etc.).
+		if avail, _ := m["ext_media_availability"].(map[string]any); avail != nil {
+			status, _ := avail["status"].(string)
+			apiReason, _ := avail["reason"].(string)
+			unavailable := (status != "" && status != "Available") || apiReason != ""
+			if unavailable {
+				skipReason := strings.ToLower(apiReason)
+				if skipReason == "dmcaed" {
+					skipReason = "dmca"
+				} else if skipReason == "" {
+					skipReason = strings.ToLower(status)
+				}
+				items = append(items, extractor.Item{
+					Kind:        extractor.KindSkipped,
+					SkipReason:  skipReason,
+					SkipTweetID: tweetID,
+				})
+				continue
+			}
 		}
 		mediaType, _ := m["type"].(string)
 

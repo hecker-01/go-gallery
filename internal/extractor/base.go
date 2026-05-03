@@ -106,6 +106,7 @@ func Paginate[T any](
 	go func() {
 		defer close(out)
 		cursor := ""
+		emptyStreak := 0
 		for {
 			if cursor != "" {
 				select {
@@ -127,6 +128,18 @@ func Paginate[T any](
 				case <-ctx.Done():
 					return
 				}
+			}
+			// Stop if the cursor didn't advance (API recycling same cursor on empty page).
+			if next == cursor {
+				return
+			}
+			if len(items) == 0 {
+				emptyStreak++
+				if emptyStreak >= 3 {
+					return
+				}
+			} else {
+				emptyStreak = 0
 			}
 			if next == "" {
 				return

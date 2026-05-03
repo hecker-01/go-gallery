@@ -2,6 +2,7 @@ package twitter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/hecker-01/go-gallery/internal/extractor"
@@ -51,10 +52,7 @@ func (e *TwitterUserExtractor) Items(ctx context.Context) <-chan extractor.Item 
 			return
 		}
 
-		operation := "UserTweets"
-		if e.mediaOnly {
-			operation = "UserMedia"
-		}
+		operation := "UserMedia"
 
 		for item := range extractor.Paginate(ctx, func(ctx context.Context, cursor string) ([]extractor.Item, string, error) {
 			return e.fetchUserPage(ctx, userID, operation, cursor)
@@ -104,9 +102,26 @@ func (e *TwitterUserExtractor) fetchUserPage(ctx context.Context, userID, operat
 	if err != nil {
 		return nil, "", err
 	}
+	if e.Params.Logger != nil && vars["cursor"] != nil {
+		if raw, jerr := json.Marshal(resp); jerr == nil {
+			e.Params.Logger.Debug(fmt.Sprintf("%s raw page response: %s", operation, string(raw)))
+		}
+	}
 	items, cursor, err := parseTweetTimeline(resp)
 	if err != nil {
 		return nil, "", err
+	}
+	if e.Params.Logger != nil {
+		cursorInStr := "first"
+		if s, _ := vars["cursor"].(string); s != "" {
+			cursorInStr = s
+		}
+		cursorOutStr := "none (end)"
+		if cursor != "" {
+			cursorOutStr = cursor
+		}
+		e.Params.Logger.Debug(fmt.Sprintf("%s page: cursor_in=%s → %d items, cursor_out=%s",
+			operation, cursorInStr, len(items), cursorOutStr))
 	}
 	// Backfill screen name from URL when the API response omits it.
 	for i := range items {

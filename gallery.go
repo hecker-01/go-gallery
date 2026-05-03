@@ -580,7 +580,7 @@ func (d *httpDownloader) Download(ctx context.Context, rawURL string, dest io.Wr
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return &HttpError{StatusCode: resp.StatusCode, URL: rawURL}
+		return galleryerrs.ClassifyHTTPStatus(resp.StatusCode, rawURL, nil)
 	}
 	_, err = io.Copy(dest, resp.Body)
 	return err
