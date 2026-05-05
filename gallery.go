@@ -403,6 +403,14 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 				return
 			}
 
+			if _, err := os.Stat(destPath); err == nil {
+				c.logger.Info("[skip] already exists: " + destPath)
+				mu.Lock()
+				result.SkippedFiles++
+				mu.Unlock()
+				return
+			}
+
 			f, err := os.Create(destPath)
 			if err != nil {
 				mu.Lock()
