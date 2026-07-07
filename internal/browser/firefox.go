@@ -48,11 +48,16 @@ func ReadFirefoxCookies(dbPath string) (*cookiejar.Jar, error) {
 	}
 	defer db.Close()
 
+	// Match twitter.com / x.com and their subdomains only. Firefox stores
+	// domain cookies with a leading dot (".x.com"), which the '%.x.com'
+	// pattern also matches. A bare '%x.com' would additionally match
+	// unrelated hosts like netflix.com or xbox.com.
 	rows, err := db.QueryContext(context.Background(),
 		`SELECT host, path, name, value, expiry, isSecure, isHttpOnly
 		 FROM moz_cookies
-		 WHERE host LIKE '%twitter.com' OR host LIKE '%x.com'
-		    OR host LIKE '.twitter.com' OR host LIKE '.x.com'`,
+		 WHERE (host = 'twitter.com' OR host LIKE '%.twitter.com'
+		     OR host = 'x.com' OR host LIKE '%.x.com')
+		   AND (expiry = 0 OR expiry > strftime('%s', 'now'))`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("browser: firefox: query cookies: %w", err)
@@ -88,6 +93,19 @@ func ReadFirefoxCookies(dbPath string) (*cookiejar.Jar, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("browser: firefox: scan cookies: %w", err)
+	}
+	if len(cookies) == 0 {
+		return nil, fmt.Errorf("browser: firefox: no valid Twitter/X cookies found: cookies may be missing or expired")
+	}
+	hasAuthToken := false
+	for _, c := range cookies {
+		if c.Name == "auth_token" && c.Value != "" {
+			hasAuthToken = true
+			break
+		}
+	}
+	if !hasAuthToken {
+		return nil, fmt.Errorf("browser: firefox: not logged in to Twitter/X in Firefox (no auth_token cookie found)")
 	}
 
 	// Set cookies for both twitter.com and x.com domains.

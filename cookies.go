@@ -26,6 +26,7 @@ func CookiesFromFile(path string) (http.CookieJar, error) {
 
 	jar, _ := cookiejar.New(nil)
 	scanner := bufio.NewScanner(f)
+	var count int
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -43,6 +44,10 @@ func CookiesFromFile(path string) (http.CookieJar, error) {
 		var expires time.Time
 		if exp, err := strconv.ParseInt(fields[4], 10, 64); err == nil && exp > 0 {
 			expires = time.Unix(exp, 0)
+		}
+		// Skip cookies that have a known expiry in the past.
+		if !expires.IsZero() && expires.Before(time.Now()) {
+			continue
 		}
 		name := fields[5]
 		value := strings.Trim(fields[6], "\"")
@@ -70,9 +75,13 @@ func CookiesFromFile(path string) (http.CookieJar, error) {
 			Secure:  secure,
 		}
 		jar.SetCookies(u, []*http.Cookie{ck})
+		count++
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, &InputError{Field: "path", Message: fmt.Sprintf("read cookies file: %v", err)}
+	}
+	if count == 0 {
+		return nil, &InputError{Field: "path", Message: "no valid cookies found: file is empty or all cookies are expired"}
 	}
 	return jar, nil
 }
