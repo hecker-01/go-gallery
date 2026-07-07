@@ -155,6 +155,54 @@ func (b *base) resolveUserID(ctx context.Context, screenName string) (string, er
 	return id, nil
 }
 
+// userProfileCacheKey is the KV-cache key for a screen name's full profile JSON.
+func userProfileCacheKey(screenName string) string {
+	return "twitter:userprofile:" + strings.ToLower(screenName)
+}
+
+// resolveUser fetches the full profile for a screen name via UserByScreenName
+// and returns both the numeric ID and the parsed profile. The profile JSON is
+// cached (userIDCacheTTL) alongside the ID so that refreshes can emit user
+// metadata without a rate-limited API call. When forceRefresh is true the
+// cache is bypassed and a fresh call is always made.
+//
+// Both the ID cache and the profile cache are updated on every fresh fetch so
+// resolveUserID stays consistent with resolveUser.
+func (b *base) resolveUser(ctx context.Context, screenName string, forceRefresh bool) (*extractor.UserMeta, error) {
+	if !forceRefresh && b.Params.Cache != nil {
+		if v, ok, err := b.Params.Cache.Get(ctx, userProfileCacheKey(screenName)); err == nil && ok && v != "" {
+			var um extractor.UserMeta
+			if json.Unmarshal([]byte(v), &um) == nil && um.ID != "" {
+				return &um, nil
+			}
+		}
+	}
+
+	resp, err := b.graphQL(ctx, "UserByScreenName", map[string]any{
+		"screen_name":           screenName,
+		"withGrokTranslatedBio": false,
+	}, map[string]any{"withAuxiliaryUserLabels": true})
+	if err != nil {
+		return nil, fmt.Errorf("resolve user %q: %w", screenName, err)
+	}
+	um, err := parseUser(resp)
+	if err != nil {
+		return nil, err
+	}
+	if um.ScreenName == "" {
+		um.ScreenName = screenName
+	}
+	if b.Params.Cache != nil {
+		if um.ID != "" {
+			_ = b.Params.Cache.Set(ctx, "twitter:userid:"+strings.ToLower(screenName), um.ID, userIDCacheTTL)
+		}
+		if data, mErr := json.Marshal(um); mErr == nil {
+			_ = b.Params.Cache.Set(ctx, userProfileCacheKey(screenName), string(data), userIDCacheTTL)
+		}
+	}
+	return um, nil
+}
+
 // hasAuthToken reports whether the cookie jar contains an auth_token cookie
 // for x.com or twitter.com (indicating an authenticated session).
 func (b *base) hasAuthToken() bool {
@@ -336,6 +384,27 @@ func imageOrig(rawURL string) string {
 		return u.String()
 	}
 	return rawURL
+}
+
+// profileImageOrig rewrites a Twitter avatar URL to the original resolution by
+// stripping the size suffix (e.g. "_normal", "_400x400") before the extension.
+// "https://.../abcd_normal.jpg" → "https://.../abcd.jpg".
+func profileImageOrig(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	ext := ""
+	if i := strings.LastIndex(rawURL, "."); i >= 0 && i > strings.LastIndex(rawURL, "/") {
+		ext = rawURL[i:]
+		rawURL = rawURL[:i]
+	}
+	for _, sz := range []string{"_normal", "_bigger", "_mini", "_400x400", "_200x200", "_x96"} {
+		if strings.HasSuffix(rawURL, sz) {
+			rawURL = strings.TrimSuffix(rawURL, sz)
+			break
+		}
+	}
+	return rawURL + ext
 }
 
 // extensionFromURL guesses the file extension from a URL.

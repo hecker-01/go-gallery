@@ -45,18 +45,30 @@ func (e *TwitterUserExtractor) Items(ctx context.Context) <-chan extractor.Item 
 	go func() {
 		defer close(out)
 
-		// Resolve user ID from screen name.
-		userID, err := e.resolveUserID(ctx, e.screenName)
+		// Resolve the full profile from the screen name. This performs (or
+		// reuses a cached) UserByScreenName call, giving both the numeric ID
+		// needed for pagination and the profile metadata emitted below.
+		user, err := e.resolveUser(ctx, e.screenName, e.Params.Twitter.ForceUserRefresh)
 		if err != nil {
 			if e.Params.Logger != nil {
 				e.Params.Logger.Error(fmt.Sprintf("failed to resolve user %q: %v", e.screenName, err))
 			}
 			return
 		}
+		userID := user.ID
 
 		// Emit a directory item first.
 		select {
 		case out <- extractor.Item{Kind: extractor.KindDirectory, DirPath: e.screenName}:
+		case <-ctx.Done():
+			return
+		}
+
+		// Emit the profile metadata so the caller can persist user.json and
+		// the avatar/banner. Sent after the directory item so the output path
+		// is already established.
+		select {
+		case out <- extractor.Item{Kind: extractor.KindUserInfo, UserInfo: user}:
 		case <-ctx.Done():
 			return
 		}

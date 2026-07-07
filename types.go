@@ -45,6 +45,31 @@ type Queue struct {
 
 func (Queue) isMessage() {}
 
+// UserProfile carries the profile metadata for the account being extracted.
+// It is emitted once per user extraction. The batteries-included Download path
+// persists it as a user.json sidecar (and downloads the avatar/banner) when
+// WithUserProfile is set; Extract callers receive it as a Message.
+type UserProfile struct {
+	ID              string    `json:"id"`
+	ScreenName      string    `json:"screen_name"`
+	Name            string    `json:"name"`
+	Bio             string    `json:"bio"`
+	Location        string    `json:"location"`
+	URL             string    `json:"url"`
+	ProfileImageURL string    `json:"profile_image_url"`
+	BannerURL       string    `json:"profile_banner_url"`
+	FollowersCount  int       `json:"followers_count"`
+	FriendsCount    int       `json:"friends_count"`
+	StatusesCount   int       `json:"statuses_count"`
+	MediaCount      int       `json:"media_count"`
+	FavouritesCount int       `json:"favourites_count"`
+	Verified        bool      `json:"verified"`
+	Protected       bool      `json:"protected"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+func (UserProfile) isMessage() {}
+
 // Skipped signals that an item was identified but cannot be retrieved -
 // deleted, DMCA-blocked, from a suspended account, geo-restricted, etc.
 // The run continues; the item is counted in Result.UnavailableFiles.
@@ -261,6 +286,12 @@ type DownloadConfig struct {
 	// MinFileSize / MaxFileSize in bytes; 0 means no limit.
 	MinFileSize int64
 	MaxFileSize int64
+	// WriteUserProfile, when true, persists the extracted UserProfile as a
+	// user.json sidecar in OutputDir and downloads the avatar/banner images.
+	WriteUserProfile bool
+	// UserProfileOverwrite controls whether an existing user.json / avatar /
+	// banner is replaced. When false they are written only if missing.
+	UserProfileOverwrite bool
 }
 
 // DownloadOption mutates a DownloadConfig.
@@ -318,6 +349,17 @@ func WithRange(rv Range) DownloadOption {
 // WithDownloaderOpt injects a custom Downloader into this Download call.
 func WithDownloaderOpt(d Downloader) DownloadOption {
 	return func(c *DownloadConfig) { c.Downloader = d }
+}
+
+// WithUserProfile enables persisting the extracted account's profile as a
+// user.json sidecar in the output directory, plus downloading its avatar.jpg
+// and banner.jpg. When overwrite is false, existing files are left untouched;
+// when true they are replaced with fresh data (used by full refresh).
+func WithUserProfile(overwrite bool) DownloadOption {
+	return func(c *DownloadConfig) {
+		c.WriteUserProfile = true
+		c.UserProfileOverwrite = overwrite
+	}
 }
 
 // Downloader is the interface that wraps media download behaviour.

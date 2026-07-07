@@ -390,6 +390,98 @@ func parseUserID(resp map[string]any) (string, error) {
 	return id, nil
 }
 
+// parseUser extracts the full profile from a UserByScreenName response into a
+// UserMeta. It reads from the classic "legacy" object first, falling back to
+// the newer nested "core"/"avatar"/"location" objects Twitter introduced in
+// 2025, so it works across both response shapes.
+func parseUser(resp map[string]any) (*extractor.UserMeta, error) {
+	// Reuse parseUserID's typed error mapping (suspended/deleted/auth/etc.);
+	// it returns the ID on success, which we also need.
+	id, err := parseUserID(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	user, err := dig(resp, "data", "user", "result")
+	if err != nil {
+		return nil, fmt.Errorf("UserByScreenName: %w", err)
+	}
+	r, _ := user.(map[string]any)
+	if r == nil {
+		return nil, fmt.Errorf("UserByScreenName: unexpected result type")
+	}
+
+	um := &extractor.UserMeta{ID: id}
+
+	if legacy, _ := r["legacy"].(map[string]any); legacy != nil {
+		um.Name, _ = legacy["name"].(string)
+		um.ScreenName, _ = legacy["screen_name"].(string)
+		um.Bio, _ = legacy["description"].(string)
+		um.Location, _ = legacy["location"].(string)
+		um.ProfileImageURL = profileImageOrig(strOrEmpty(legacy["profile_image_url_https"]))
+		um.BannerURL, _ = legacy["profile_banner_url"].(string)
+		um.FollowersCount = intOrZero(legacy["followers_count"])
+		um.FriendsCount = intOrZero(legacy["friends_count"])
+		um.StatusesCount = intOrZero(legacy["statuses_count"])
+		um.MediaCount = intOrZero(legacy["media_count"])
+		um.FavouritesCount = intOrZero(legacy["favourites_count"])
+		um.Protected = boolOrFalse(legacy["protected"])
+		um.Verified = boolOrFalse(legacy["verified"])
+		um.CreatedAt = parseTwitterDate(strOrEmpty(legacy["created_at"]))
+		um.URL = expandedProfileURL(legacy)
+	}
+
+	// New 2025 "core" object carries name/screen_name/created_at.
+	if core, _ := r["core"].(map[string]any); core != nil {
+		if um.ScreenName == "" {
+			um.ScreenName, _ = core["screen_name"].(string)
+		}
+		if um.Name == "" {
+			um.Name, _ = core["name"].(string)
+		}
+		if um.CreatedAt.IsZero() {
+			um.CreatedAt = parseTwitterDate(strOrEmpty(core["created_at"]))
+		}
+	}
+	// New avatar location.
+	if um.ProfileImageURL == "" {
+		if av, _ := r["avatar"].(map[string]any); av != nil {
+			um.ProfileImageURL = profileImageOrig(strOrEmpty(av["image_url"]))
+		}
+	}
+	// New nested location object.
+	if um.Location == "" {
+		if loc, _ := r["location"].(map[string]any); loc != nil {
+			um.Location, _ = loc["location"].(string)
+		}
+	}
+	// Blue-check verification lives at the result level.
+	if !um.Verified {
+		um.Verified = boolOrFalse(r["is_blue_verified"])
+	}
+
+	return um, nil
+}
+
+// expandedProfileURL pulls the profile's website link out of a legacy user
+// object, preferring the expanded (non-t.co) URL when the entities block has
+// one.
+func expandedProfileURL(legacy map[string]any) string {
+	if e, _ := legacy["entities"].(map[string]any); e != nil {
+		if urlObj, _ := e["url"].(map[string]any); urlObj != nil {
+			if urls, _ := urlObj["urls"].([]any); len(urls) > 0 {
+				if u0, _ := urls[0].(map[string]any); u0 != nil {
+					if exp, _ := u0["expanded_url"].(string); exp != "" {
+						return exp
+					}
+				}
+			}
+		}
+	}
+	s, _ := legacy["url"].(string)
+	return s
+}
+
 // twOpts is a local shorthand for the Twitter extractor options threaded
 // through the parse functions.
 type twOpts = extractor.TwitterOptions

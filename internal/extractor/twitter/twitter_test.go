@@ -98,6 +98,110 @@ func TestParseUserID(t *testing.T) {
 	}
 }
 
+func TestParseUser_LegacyShape(t *testing.T) {
+	resp := map[string]any{
+		"data": map[string]any{
+			"user": map[string]any{
+				"result": map[string]any{
+					"rest_id":          "44196397",
+					"is_blue_verified": true,
+					"legacy": map[string]any{
+						"id_str":                  "44196397",
+						"name":                    "Elon Musk",
+						"screen_name":             "elonmusk",
+						"description":             "hello",
+						"location":                "Mars",
+						"profile_image_url_https": "https://pbs.twimg.com/profile_images/1/abc_normal.jpg",
+						"profile_banner_url":      "https://pbs.twimg.com/profile_banners/44196397/1",
+						"followers_count":         float64(100),
+						"friends_count":           float64(5),
+						"statuses_count":          float64(2000),
+						"media_count":             float64(300),
+						"favourites_count":        float64(50),
+						"protected":               false,
+						"verified":                false,
+						"created_at":              "Tue Jun 02 20:12:29 +0000 2009",
+						"entities": map[string]any{
+							"url": map[string]any{
+								"urls": []any{
+									map[string]any{"expanded_url": "https://tesla.com"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	um, err := parseUser(resp)
+	if err != nil {
+		t.Fatalf("parseUser: %v", err)
+	}
+	if um.ID != "44196397" || um.ScreenName != "elonmusk" || um.Name != "Elon Musk" {
+		t.Errorf("identity mismatch: %+v", um)
+	}
+	if um.Bio != "hello" || um.Location != "Mars" || um.URL != "https://tesla.com" {
+		t.Errorf("profile text mismatch: %+v", um)
+	}
+	if um.ProfileImageURL != "https://pbs.twimg.com/profile_images/1/abc.jpg" {
+		t.Errorf("avatar not upscaled: %q", um.ProfileImageURL)
+	}
+	if um.FollowersCount != 100 || um.MediaCount != 300 {
+		t.Errorf("counts mismatch: %+v", um)
+	}
+	if !um.Verified {
+		t.Errorf("expected blue-verified to set Verified")
+	}
+	if um.CreatedAt.IsZero() {
+		t.Errorf("expected created_at parsed")
+	}
+}
+
+func TestParseUser_CoreFallback(t *testing.T) {
+	// 2025 shape: name/screen_name live under "core", avatar under "avatar".
+	resp := map[string]any{
+		"data": map[string]any{
+			"user": map[string]any{
+				"result": map[string]any{
+					"rest_id": "77",
+					"legacy":  map[string]any{"id_str": "77"},
+					"core": map[string]any{
+						"name":        "New Format",
+						"screen_name": "newfmt",
+					},
+					"avatar": map[string]any{
+						"image_url": "https://pbs.twimg.com/profile_images/9/z_400x400.png",
+					},
+				},
+			},
+		},
+	}
+	um, err := parseUser(resp)
+	if err != nil {
+		t.Fatalf("parseUser: %v", err)
+	}
+	if um.ScreenName != "newfmt" || um.Name != "New Format" {
+		t.Errorf("core fallback failed: %+v", um)
+	}
+	if um.ProfileImageURL != "https://pbs.twimg.com/profile_images/9/z.png" {
+		t.Errorf("avatar fallback failed: %q", um.ProfileImageURL)
+	}
+}
+
+func TestProfileImageOrig(t *testing.T) {
+	cases := map[string]string{
+		"https://pbs.twimg.com/profile_images/1/abc_normal.jpg":  "https://pbs.twimg.com/profile_images/1/abc.jpg",
+		"https://pbs.twimg.com/profile_images/1/abc_400x400.png": "https://pbs.twimg.com/profile_images/1/abc.png",
+		"https://pbs.twimg.com/profile_images/1/abc.jpg":         "https://pbs.twimg.com/profile_images/1/abc.jpg",
+		"": "",
+	}
+	for in, want := range cases {
+		if got := profileImageOrig(in); got != want {
+			t.Errorf("profileImageOrig(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestParseUserID_SuspendedAccount(t *testing.T) {
 	resp := map[string]any{
 		"errors": []any{

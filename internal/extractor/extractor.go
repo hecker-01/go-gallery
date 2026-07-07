@@ -26,7 +26,8 @@ const (
 	KindDirectory ItemKind = iota
 	KindMedia
 	KindQueue
-	KindSkipped // item was identified but permanently unavailable
+	KindSkipped  // item was identified but permanently unavailable
+	KindUserInfo // profile metadata for the account being extracted
 )
 
 // AuthorMeta holds the Twitter user fields embedded in every ItemMeta.
@@ -34,6 +35,28 @@ type AuthorMeta struct {
 	ID         string
 	Name       string
 	ScreenName string
+}
+
+// UserMeta is the profile record for the account whose media is being
+// extracted. It is emitted once per run as a KindUserInfo item so the caller
+// can persist a user.json sidecar and download the avatar/banner.
+type UserMeta struct {
+	ID              string
+	ScreenName      string
+	Name            string
+	Bio             string
+	Location        string
+	URL             string // expanded profile link
+	ProfileImageURL string // original-resolution avatar
+	BannerURL       string
+	FollowersCount  int
+	FriendsCount    int
+	StatusesCount   int
+	MediaCount      int
+	FavouritesCount int
+	Verified        bool
+	Protected       bool
+	CreatedAt       time.Time
 }
 
 // ItemMeta is the full metadata record for a single extracted media item.
@@ -80,6 +103,9 @@ type Item struct {
 	// KindSkipped
 	SkipReason  string // "tombstone" | "deleted" | "suspended" | "dmca" | ...
 	SkipTweetID string
+
+	// KindUserInfo
+	UserInfo *UserMeta
 }
 
 // ─── Client params ───────────────────────────────────────────────────────────
@@ -105,6 +131,10 @@ type TwitterOptions struct {
 	// VideoMaxBitrate picks the highest-bitrate video variant; false picks
 	// the lowest.
 	VideoMaxBitrate bool
+	// ForceUserRefresh bypasses the cached user profile so a fresh
+	// UserByScreenName call is made and up-to-date UserMeta is emitted.
+	// Used by full refresh to update a stale user.json.
+	ForceUserRefresh bool
 }
 
 // ClientParams bundles the dependencies that an Extractor needs from the

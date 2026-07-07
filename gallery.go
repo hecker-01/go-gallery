@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
@@ -241,10 +242,11 @@ func (c *Client) Extract(ctx context.Context, url string) (<-chan Message, <-cha
 		RateLimits:  c.rlRegistry,
 		Concurrency: c.concurrency,
 		Twitter: extractor.TwitterOptions{
-			GuestToken:      c.cfg.Twitter.GuestToken,
-			UserAgent:       c.cfg.Twitter.UserAgent,
-			RetweetsEnabled: c.cfg.Twitter.RetweetsEnabled,
-			VideoMaxBitrate: c.cfg.Twitter.VideoMaxBitrate,
+			GuestToken:       c.cfg.Twitter.GuestToken,
+			UserAgent:        c.cfg.Twitter.UserAgent,
+			RetweetsEnabled:  c.cfg.Twitter.RetweetsEnabled,
+			VideoMaxBitrate:  c.cfg.Twitter.VideoMaxBitrate,
+			ForceUserRefresh: c.cfg.Twitter.ForceUserRefresh,
 		},
 	}
 
@@ -283,8 +285,35 @@ func convertItem(item extractor.Item) Message {
 		return Queue{URL: item.QueueURL}
 	case extractor.KindSkipped:
 		return Skipped{TweetID: item.SkipTweetID, Reason: item.SkipReason}
+	case extractor.KindUserInfo:
+		return convertUser(item.UserInfo)
 	default:
 		return Queue{URL: item.QueueURL}
+	}
+}
+
+// convertUser maps an internal extractor.UserMeta to the public UserProfile.
+func convertUser(u *extractor.UserMeta) UserProfile {
+	if u == nil {
+		return UserProfile{}
+	}
+	return UserProfile{
+		ID:              u.ID,
+		ScreenName:      u.ScreenName,
+		Name:            u.Name,
+		Bio:             u.Bio,
+		Location:        u.Location,
+		URL:             u.URL,
+		ProfileImageURL: u.ProfileImageURL,
+		BannerURL:       u.BannerURL,
+		FollowersCount:  u.FollowersCount,
+		FriendsCount:    u.FriendsCount,
+		StatusesCount:   u.StatusesCount,
+		MediaCount:      u.MediaCount,
+		FavouritesCount: u.FavouritesCount,
+		Verified:        u.Verified,
+		Protected:       u.Protected,
+		CreatedAt:       u.CreatedAt,
 	}
 }
 
@@ -396,6 +425,18 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 			continue
 		}
 
+		// Profile metadata: persist user.json + avatar/banner when requested.
+		if up, ok := msg.(UserProfile); ok {
+			if cfg.WriteUserProfile && !cfg.Simulate {
+				wg.Add(1)
+				go func(up UserProfile) {
+					defer wg.Done()
+					c.writeUserProfile(ctx, cfg, up)
+				}(up)
+			}
+			continue
+		}
+
 		media, ok := msg.(Media)
 		if !ok {
 			continue
@@ -466,6 +507,13 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 
 			if _, err := os.Stat(destPath); err == nil {
 				c.logger.Info("[skip] already exists: " + destPath)
+				// Backfill any missing sidecars (e.g. metadata JSON) for a file
+				// that was downloaded before those processors were enabled.
+				for _, pp := range cfg.PostProcessors {
+					if bp, ok := pp.(BackfillProcessor); ok {
+						_ = bp.OnExisting(ctx, destPath, mi)
+					}
+				}
 				mu.Lock()
 				result.SkippedFiles++
 				mu.Unlock()
@@ -547,6 +595,116 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 
 	result.Duration = time.Since(start)
 	return result, nil
+}
+
+// writeUserProfile persists a UserProfile as user.json in cfg.OutputDir and
+// downloads the avatar and banner images. Existing files are left untouched
+// unless cfg.UserProfileOverwrite is set. Failures are logged, not fatal — a
+// profile sidecar is a best-effort extra, never a reason to fail the run.
+func (c *Client) writeUserProfile(ctx context.Context, cfg DownloadConfig, up UserProfile) {
+	dir := cfg.OutputDir
+	if dir == "" {
+		dir = "."
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		c.logger.Warn("user profile: create dir: " + err.Error())
+		return
+	}
+
+	jsonPath := filepath.Join(dir, "user.json")
+	if cfg.UserProfileOverwrite || !fileExists(jsonPath) {
+		if data, err := json.MarshalIndent(up, "", "  "); err != nil {
+			c.logger.Warn("user profile: marshal: " + err.Error())
+		} else if err := os.WriteFile(jsonPath, data, 0644); err != nil {
+			c.logger.Warn("user profile: write user.json: " + err.Error())
+		} else {
+			c.logger.Info(jsonPath)
+		}
+	}
+
+	if up.ProfileImageURL != "" {
+		ext := extensionFromURL(up.ProfileImageURL)
+		if ext == "" {
+			ext = "jpg"
+		}
+		avatarPath := filepath.Join(dir, "avatar."+ext)
+		if cfg.UserProfileOverwrite || !fileExists(avatarPath) {
+			c.downloadProfileImage(ctx, up.ProfileImageURL, avatarPath)
+		}
+	}
+
+	if up.BannerURL != "" {
+		// Twitter banner URLs carry no extension and serve JPEG by default.
+		bannerPath := filepath.Join(dir, "banner.jpg")
+		if cfg.UserProfileOverwrite || !fileExists(bannerPath) {
+			c.downloadProfileImage(ctx, up.BannerURL, bannerPath)
+		}
+	}
+}
+
+// downloadProfileImage fetches a profile image (avatar/banner) to dest via a
+// temporary .part file. Best-effort: any failure is logged and the partial
+// file removed.
+func (c *Client) downloadProfileImage(ctx context.Context, rawURL, dest string) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		c.logger.Warn("user profile: request " + dest + ": " + err.Error())
+		return
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		c.logger.Warn("user profile: fetch " + dest + ": " + err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		c.logger.Warn(fmt.Sprintf("user profile: fetch %s: HTTP %d", dest, resp.StatusCode))
+		return
+	}
+
+	tmp := dest + ".part"
+	f, err := os.Create(tmp)
+	if err != nil {
+		c.logger.Warn("user profile: create " + dest + ": " + err.Error())
+		return
+	}
+	// Cap at 32 MB; avatars and banners are far smaller.
+	_, err = io.Copy(f, io.LimitReader(resp.Body, 32<<20))
+	f.Close()
+	if err != nil {
+		os.Remove(tmp)
+		c.logger.Warn("user profile: save " + dest + ": " + err.Error())
+		return
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		os.Remove(tmp)
+		c.logger.Warn("user profile: finalize " + dest + ": " + err.Error())
+		return
+	}
+	c.logger.Info(dest)
+}
+
+// fileExists reports whether path exists (as a file or directory).
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// extensionFromURL guesses a file extension from a URL path (no leading dot);
+// returns "" when none is present.
+func extensionFromURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	base := u.Path
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	if i := strings.LastIndex(base, "."); i >= 0 {
+		return strings.ToLower(base[i+1:])
+	}
+	return ""
 }
 
 // GetURLs returns MediaInfo slices containing direct download URLs and metadata

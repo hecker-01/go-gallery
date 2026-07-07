@@ -49,6 +49,9 @@ type TwitterConfig struct {
 	RetweetsEnabled bool `json:"retweets_enabled" yaml:"retweets_enabled" toml:"retweets_enabled"`
 	// VideoMaxBitrate picks the highest bitrate variant; false picks lowest.
 	VideoMaxBitrate bool `json:"video_max_bitrate" yaml:"video_max_bitrate" toml:"video_max_bitrate"`
+	// ForceUserRefresh bypasses the cached user profile so a fresh
+	// UserByScreenName call is made, yielding up-to-date UserProfile data.
+	ForceUserRefresh bool `json:"force_user_refresh" yaml:"force_user_refresh" toml:"force_user_refresh"`
 }
 
 // ArchiveConfig controls the download archive (deduplication database).

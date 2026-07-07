@@ -33,6 +33,15 @@ type PostProcessor interface {
 	OnError(ctx context.Context, err error, info *MediaInfo) error
 }
 
+// BackfillProcessor is an optional PostProcessor extension. When a download is
+// skipped because the file already exists on disk, Download calls OnExisting so
+// the processor can create sidecars (e.g. metadata JSON) that may be missing
+// from a file downloaded before the processor was enabled. Implementations
+// must be safe for concurrent use and should no-op when the sidecar is present.
+type BackfillProcessor interface {
+	OnExisting(ctx context.Context, path string, info *MediaInfo) error
+}
+
 // nopPostProcessor is an embeddable no-op implementation for partial overrides.
 type nopPostProcessor struct{ name string }
 
@@ -230,6 +239,16 @@ func (p *MetadataPostProcessor) OnFile(_ context.Context, path string, info *Med
 	}
 	sidecar := path + ".json"
 	return os.WriteFile(sidecar, data, 0644)
+}
+
+// OnExisting backfills the metadata sidecar for an already-downloaded file when
+// it is missing. Present sidecars are left untouched, so re-scanning a fully
+// annotated library is cheap. Satisfies BackfillProcessor.
+func (p *MetadataPostProcessor) OnExisting(ctx context.Context, path string, info *MediaInfo) error {
+	if _, err := os.Stat(path + ".json"); err == nil {
+		return nil // sidecar already present
+	}
+	return p.OnFile(ctx, path, info)
 }
 
 // ─── HashPostProcessor ───────────────────────────────────────────────────────
