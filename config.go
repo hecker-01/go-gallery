@@ -44,9 +44,8 @@ type TwitterConfig struct {
 	CSRF string `json:"csrf" yaml:"csrf" toml:"csrf"`
 	// UserAgent overrides the default browser User-Agent sent to Twitter.
 	UserAgent string `json:"user_agent" yaml:"user_agent" toml:"user_agent"`
-	// RepliesEnabled includes reply tweets when extracting a user timeline.
-	RepliesEnabled bool `json:"replies_enabled" yaml:"replies_enabled" toml:"replies_enabled"`
-	// RetweetsEnabled includes retweets when extracting a user timeline.
+	// RetweetsEnabled emits media from retweets on timelines that include
+	// them (home, list, search). Defaults to false, matching gallery-dl.
 	RetweetsEnabled bool `json:"retweets_enabled" yaml:"retweets_enabled" toml:"retweets_enabled"`
 	// VideoMaxBitrate picks the highest bitrate variant; false picks lowest.
 	VideoMaxBitrate bool `json:"video_max_bitrate" yaml:"video_max_bitrate" toml:"video_max_bitrate"`
@@ -101,9 +100,7 @@ func DefaultConfig() Config {
 			SkipExisting:   true,
 		},
 		Twitter: TwitterConfig{
-			UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 			VideoMaxBitrate: true,
-			RetweetsEnabled: true,
 		},
 		Archive: ArchiveConfig{
 			Key:     "{tweet_id}_{num}",

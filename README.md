@@ -192,9 +192,11 @@ output:
   write_metadata: false
 
 twitter:
-  replies_enabled: false
-  retweets_enabled: true
-  video_max_bitrate: true # pick highest bitrate video variant
+  retweets_enabled: false # include media from retweets on home/list/search timelines
+  video_max_bitrate: true # pick highest bitrate video variant; false picks lowest
+  user_agent: "" # override the browser User-Agent (empty = built-in default)
+  auth_token: "" # authenticate via config instead of browser cookies
+  csrf: "" # ct0 value, paired with auth_token
 
 archive:
   enabled: true

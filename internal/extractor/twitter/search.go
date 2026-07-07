@@ -67,5 +67,5 @@ func (e *TwitterSearchExtractor) fetchSearchPage(ctx context.Context, cursor str
 	if err != nil {
 		return nil, "", err
 	}
-	return parseSearchTimeline(resp)
+	return parseSearchTimeline(resp, e.Params.Twitter)
 }

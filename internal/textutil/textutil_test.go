@@ -8,7 +8,9 @@ func TestTruncate(t *testing.T) {
 		max       int
 		want      string
 	}{
-		{"hello world", "...", 5, "hell..."},
+		// Result is at most max runes including the suffix (see Truncate doc),
+		// consistent with the max=8 case below.
+		{"hello world", "...", 5, "he..."},
 		{"hello", "...", 10, "hello"},
 		{"hello world", "...", 8, "hello..."},
 		{"", "...", 5, ""},

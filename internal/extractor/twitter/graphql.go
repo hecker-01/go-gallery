@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -124,12 +125,7 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 		return nil, fmt.Errorf("twitter graphql %s: marshal variables: %w", operation, err)
 	}
 
-	endpoint := fmt.Sprintf("%s/i/api/graphql/%s/%s", b.endpointBase, qid, operation)
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return nil, err
-	}
-	q := u.Query()
+	q := url.Values{}
 	q.Set("variables", string(variablesJSON))
 	// UserByScreenName uses a different, smaller feature set.
 	if operation == "UserByScreenName" {
@@ -142,11 +138,18 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 			q.Set("fieldToggles", string(ft))
 		}
 	}
-	u.RawQuery = q.Encode()
+	rawQuery := q.Encode()
+
+	// The URL is rebuilt each attempt: a 404 means the query ID rotated, and
+	// the retry after a refresh must use the new ID.
+	buildURL := func() string {
+		return fmt.Sprintf("%s/i/api/graphql/%s/%s?%s", b.endpointBase, qid, operation, rawQuery)
+	}
 
 	reqID := fmt.Sprintf("%04x", graphQLReqSeq.Add(1))
 
 	var lastRateLimitErr error
+	qidRefreshed := false
 	for attempt := 0; attempt <= maxRateLimitRetries; attempt++ {
 		if b.Params.RateLimits != nil {
 			if wait := b.Params.RateLimits.Wait(operation, time.Now()); wait > 0 {
@@ -162,14 +165,15 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 			}
 		}
 
+		reqURL := buildURL()
 		if b.Params.Logger != nil {
 			b.Params.Logger.Debug(fmt.Sprintf("→ #%s %s (attempt %d/%d): %s",
-				reqID, operation, attempt+1, maxRateLimitRetries+1, u.String()))
+				reqID, operation, attempt+1, maxRateLimitRetries+1, reqURL))
 		}
 		reqStart := time.Now()
 
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, 60*time.Second)
-		resp, err := b.doGet(attemptCtx, u.String())
+		resp, err := b.doGet(attemptCtx, reqURL)
 		elapsed := time.Since(reqStart)
 
 		if err != nil {
@@ -194,7 +198,9 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 			b.Params.Logger.Debug(fmt.Sprintf("← #%s %s: %d in %s",
 				reqID, operation, resp.StatusCode, elapsed.Round(time.Millisecond)))
 		}
-		defer resp.Body.Close()
+		// The body is closed explicitly on every path below rather than
+		// deferred: a deferred close would stack once per retry attempt and,
+		// worse, hold the 429 response open through a many-minute sleep.
 
 		if b.Params.RateLimits != nil {
 			b.Params.RateLimits.Update(operation, resp)
@@ -207,14 +213,17 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 		}
 
 		if resp.StatusCode == http.StatusUnauthorized {
+			resp.Body.Close()
 			attemptCancel()
 			return nil, &galleryerrs.AuthenticationError{}
 		}
 		if resp.StatusCode == http.StatusForbidden {
+			resp.Body.Close()
 			attemptCancel()
 			return nil, &galleryerrs.AuthorizationError{URL: operation}
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
+			resp.Body.Close()
 			attemptCancel() // body not needed; release context before sleeping
 			resetAt := parseRateLimitReset(resp)
 			if b.Params.RateLimitCB != nil {
@@ -239,13 +248,31 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 			}
 			return nil, lastRateLimitErr
 		}
-		if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound && !qidRefreshed {
+			// A 404 on a GraphQL endpoint almost always means the query ID
+			// rotated with a web-client deploy. Scrape the current IDs from
+			// the client JS bundle and retry once with the fresh ID.
+			resp.Body.Close()
 			attemptCancel()
-			return nil, galleryerrs.ClassifyHTTPStatus(resp.StatusCode, endpoint, nil)
+			qidRefreshed = true
+			if newID, ok := b.refreshedQueryID(ctx, operation); ok && newID != qid {
+				if b.Params.Logger != nil {
+					b.Params.Logger.Info(fmt.Sprintf("twitter %s: query ID rotated; retrying with refreshed ID", operation))
+				}
+				qid = newID
+				continue
+			}
+			return nil, galleryerrs.ClassifyHTTPStatus(resp.StatusCode, reqURL, nil)
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			attemptCancel()
+			return nil, galleryerrs.ClassifyHTTPStatus(resp.StatusCode, reqURL, nil)
 		}
 
 		var result map[string]any
 		bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		resp.Body.Close()
 		attemptCancel() // body fully consumed; release context
 		if err != nil {
 			return nil, fmt.Errorf("twitter graphql %s: read body: %w", operation, err)
@@ -253,15 +280,10 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 		if err := json.Unmarshal(bodyBytes, &result); err != nil {
 			return nil, fmt.Errorf("twitter graphql %s: decode: %w", operation, err)
 		}
-		// Debug: log the full API result
-		if b.Params.Logger != nil {
+		// Debug: log the full API result. The Enabled check matters: bodies run
+		// up to 8 MB and the Sprintf must not execute when debug is off.
+		if b.Params.Logger != nil && b.Params.Logger.Enabled(ctx, slog.LevelDebug) {
 			b.Params.Logger.Debug(fmt.Sprintf("graphql result for %s: %s", operation, string(bodyBytes)))
-		}
-		// Debug: log full response when data is unexpectedly empty.
-		if data, ok := result["data"].(map[string]any); ok && len(data) == 0 {
-			if b.Params.Logger != nil {
-				b.Params.Logger.Debug(fmt.Sprintf("graphql empty data response for %s: %s", operation, string(bodyBytes)))
-			}
 		}
 		return result, nil
 	}
@@ -272,19 +294,23 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 // invalidate any stale entries from a previous binary version.
 const queryIDCacheVersion = "v2"
 
-// queryID returns the query ID for the named operation, checking the cache
-// first, then the baked-in default map.
+// qidCacheKey is the KV-cache key for an operation's query ID. Only IDs
+// scraped from the web client are stored (see refreshedQueryID); defaults are
+// never written since they are already baked into the binary.
+func qidCacheKey(operation string) string {
+	return "twitter:qid:" + queryIDCacheVersion + ":" + operation
+}
+
+// queryID returns the query ID for the named operation: a previously scraped
+// ID from the cache when present (it reflects the live web client), else the
+// baked-in default.
 func (b *base) queryID(ctx context.Context, operation string) string {
-	cacheKey := "twitter:qid:" + queryIDCacheVersion + ":" + operation
 	if b.Params.Cache != nil {
-		if v, ok, err := b.Params.Cache.Get(ctx, cacheKey); err == nil && ok {
+		if v, ok, err := b.Params.Cache.Get(ctx, qidCacheKey(operation)); err == nil && ok {
 			return v
 		}
 	}
 	if id, ok := defaultQueryIDs[operation]; ok {
-		if b.Params.Cache != nil {
-			_ = b.Params.Cache.Set(ctx, cacheKey, id, 24*time.Hour)
-		}
 		return id
 	}
 	return operation // fallback: use the operation name itself (will fail, but won't panic)
@@ -364,68 +390,96 @@ func parseUserID(resp map[string]any) (string, error) {
 	return id, nil
 }
 
+// twOpts is a local shorthand for the Twitter extractor options threaded
+// through the parse functions.
+type twOpts = extractor.TwitterOptions
+
 // parseTweetTimeline parses a UserTweets / UserMedia response and returns
 // (items, nextCursor, error).
-func parseTweetTimeline(resp map[string]any) ([]extractor.Item, string, error) {
+func parseTweetTimeline(resp map[string]any, opts twOpts) ([]extractor.Item, string, error) {
 	instructions, err := findTimelineInstructions(resp)
 	if err != nil {
 		return nil, "", err
 	}
-	return extractTimelineItems(instructions)
+	return extractTimelineItems(instructions, opts)
 }
 
 // parseSearchTimeline parses a SearchTimeline response.
-func parseSearchTimeline(resp map[string]any) ([]extractor.Item, string, error) {
+func parseSearchTimeline(resp map[string]any, opts twOpts) ([]extractor.Item, string, error) {
 	instructions, err := digArr(resp, "data", "search_by_raw_query", "search_timeline", "timeline", "instructions")
 	if err != nil {
 		return nil, "", err
 	}
-	return extractTimelineItems(instructions)
+	return extractTimelineItems(instructions, opts)
 }
 
 // parseBookmarks parses a Bookmarks response.
-func parseBookmarks(resp map[string]any) ([]extractor.Item, string, error) {
+func parseBookmarks(resp map[string]any, opts twOpts) ([]extractor.Item, string, error) {
 	instructions, err := digArr(resp, "data", "bookmark_timeline_v2", "timeline", "instructions")
 	if err != nil {
 		return nil, "", err
 	}
-	return extractTimelineItems(instructions)
+	return extractTimelineItems(instructions, opts)
 }
 
 // parseLikes parses a Likes response.
-func parseLikes(resp map[string]any) ([]extractor.Item, string, error) {
+func parseLikes(resp map[string]any, opts twOpts) ([]extractor.Item, string, error) {
 	instructions, err := findTimelineInstructions(resp)
 	if err != nil {
 		return nil, "", err
 	}
-	return extractTimelineItems(instructions)
+	return extractTimelineItems(instructions, opts)
 }
 
 // parseHomeTimeline parses a HomeTimeline response.
-func parseHomeTimeline(resp map[string]any) ([]extractor.Item, string, error) {
+func parseHomeTimeline(resp map[string]any, opts twOpts) ([]extractor.Item, string, error) {
 	instructions, err := digArr(resp, "data", "home", "home_timeline_urt", "instructions")
 	if err != nil {
 		return nil, "", err
 	}
-	return extractTimelineItems(instructions)
+	return extractTimelineItems(instructions, opts)
 }
 
 // parseListTimeline parses a ListLatestTweetsTimeline response.
-func parseListTimeline(resp map[string]any) ([]extractor.Item, string, error) {
+func parseListTimeline(resp map[string]any, opts twOpts) ([]extractor.Item, string, error) {
 	instructions, err := findTimelineInstructions(resp)
 	if err != nil {
 		return nil, "", err
 	}
-	return extractTimelineItems(instructions)
+	return extractTimelineItems(instructions, opts)
 }
 
-// parseTweetDetail extracts items from a TweetDetail response.
-func parseTweetDetail(resp map[string]any) ([]extractor.Item, error) {
-	res, err := dig(resp, "data", "tweetResult", "result")
+// parseTweetDetail extracts items from a TweetDetail response. Two response
+// shapes exist: a direct "tweetResult" object (TweetResultByRestId-style) and
+// the conversation timeline ("threaded_conversation_with_injections_v2") that
+// TweetDetail proper returns; the latter includes replies, so items are
+// filtered to focalTweetID when it is non-empty.
+func parseTweetDetail(resp map[string]any, focalTweetID string, opts twOpts) ([]extractor.Item, error) {
+	if res, err := dig(resp, "data", "tweetResult", "result"); err == nil {
+		// num=0/count=0 → media numbered 1…n automatically; forcing 1/1 here
+		// would give every photo of a multi-image tweet the same {num}.
+		return tweetResultToItems(res, 0, 0, "", opts), nil
+	}
+	instructions, err := digArr(resp, "data", "threaded_conversation_with_injections_v2", "instructions")
+	if err != nil {
+		return nil, fmt.Errorf("TweetDetail: could not locate tweet result: %w", err)
+	}
+	all, _, err := extractTimelineItems(instructions, opts)
 	if err != nil {
 		return nil, err
 	}
-	items := tweetResultToItems(res, 1, 1, "")
+	if focalTweetID == "" {
+		return all, nil
+	}
+	var items []extractor.Item
+	for _, it := range all {
+		switch {
+		case it.Meta != nil && it.Meta.TweetID == focalTweetID:
+			items = append(items, it)
+		case it.Kind == extractor.KindSkipped && it.SkipTweetID == focalTweetID:
+			items = append(items, it)
+		}
+	}
 	return items, nil
 }
 
@@ -465,7 +519,7 @@ func findTimelineInstructions(resp map[string]any) ([]any, error) {
 //
 // type="TimelineTerminateTimeline" with direction="Bottom" signals the end of
 // the timeline; the cursor is cleared so pagination stops cleanly.
-func extractTimelineItems(instructions []any) ([]extractor.Item, string, error) {
+func extractTimelineItems(instructions []any, opts twOpts) ([]extractor.Item, string, error) {
 	var items []extractor.Item
 	var nextCursor string
 	terminated := false
@@ -502,7 +556,7 @@ func extractTimelineItems(instructions []any) ([]extractor.Item, string, error) 
 				if strings.HasPrefix(entryID, "cursor-") {
 					continue
 				}
-				newItems := itemContentToItems(ic, entryID)
+				newItems := itemContentToItems(ic, entryID, opts)
 				items = append(items, newItems...)
 			}
 			continue
@@ -530,7 +584,7 @@ func extractTimelineItems(instructions []any) ([]extractor.Item, string, error) 
 				if strings.HasPrefix(entryID, "cursor-") {
 					continue
 				}
-				newItems := entryToItems(entry)
+				newItems := entryToItems(entry, opts)
 				items = append(items, newItems...)
 			}
 		case "TimelineAddToModule":
@@ -557,7 +611,7 @@ func extractTimelineItems(instructions []any) ([]extractor.Item, string, error) 
 				if strings.HasPrefix(entryID, "cursor-") {
 					continue
 				}
-				newItems := itemContentToItems(ic, entryID)
+				newItems := itemContentToItems(ic, entryID, opts)
 				items = append(items, newItems...)
 			}
 		case "TimelineReplaceEntry":
@@ -602,7 +656,7 @@ func extractCursorFromEntry(entry map[string]any) string {
 // entryToItems converts a single TimelineAddEntries entry to extractor Items.
 // Handles TimelineTimelineItem (single tweet) and TimelineTimelineModule
 // (tweet group / media grid row) content types.
-func entryToItems(entry map[string]any) []extractor.Item {
+func entryToItems(entry map[string]any, opts twOpts) []extractor.Item {
 	entryID, _ := entry["entryId"].(string)
 	content, ok := entry["content"].(map[string]any)
 	if !ok {
@@ -612,7 +666,7 @@ func entryToItems(entry map[string]any) []extractor.Item {
 	switch contentType {
 	case "TimelineTimelineItem":
 		ic, _ := content["itemContent"].(map[string]any)
-		return itemContentToItems(ic, entryID)
+		return itemContentToItems(ic, entryID, opts)
 	case "TimelineTimelineModule":
 		items2, _ := content["items"].([]any)
 		var out []extractor.Item
@@ -626,7 +680,7 @@ func entryToItems(entry map[string]any) []extractor.Item {
 				continue
 			}
 			ic3, _ := ic2["itemContent"].(map[string]any)
-			out = append(out, itemContentToItems(ic3, entryID)...)
+			out = append(out, itemContentToItems(ic3, entryID, opts)...)
 		}
 		return out
 	}
@@ -636,7 +690,7 @@ func entryToItems(entry map[string]any) []extractor.Item {
 // itemContentToItems extracts items from a TimelineTweet itemContent object.
 // Only TimelineTweet itemType is processed; all other content types (ads,
 // promoted content, etc.) are silently ignored.
-func itemContentToItems(ic map[string]any, entryID string) []extractor.Item {
+func itemContentToItems(ic map[string]any, entryID string, opts twOpts) []extractor.Item {
 	if ic == nil {
 		return nil
 	}
@@ -649,7 +703,7 @@ func itemContentToItems(ic map[string]any, entryID string) []extractor.Item {
 		return nil
 	}
 	result, _ := tweetResult["result"].(map[string]any)
-	return tweetResultToItems(result, 0, 0, entryID)
+	return tweetResultToItems(result, 0, 0, entryID, opts)
 }
 
 // tweetResultToItems converts a raw tweet result map to extractor Items.
@@ -666,7 +720,7 @@ func itemContentToItems(ic map[string]any, entryID string) []extractor.Item {
 // a download item. Media marked with a non-"Available" status (e.g. DMCA
 // takedowns reported as reason="Dmcaed") emits a KindSkipped item instead so
 // the caller can log and count it without attempting a download.
-func tweetResultToItems(result any, num, count int, entryID string) []extractor.Item {
+func tweetResultToItems(result any, num, count int, entryID string, opts twOpts) []extractor.Item {
 	r, ok := result.(map[string]any)
 	if !ok {
 		return nil
@@ -716,7 +770,7 @@ func tweetResultToItems(result any, num, count int, entryID string) []extractor.
 	if typename == "TweetWithVisibilityResults" {
 		inner, _ := r["tweet"].(map[string]any)
 		if inner != nil {
-			return tweetResultToItems(inner, num, count, entryID)
+			return tweetResultToItems(inner, num, count, entryID, opts)
 		}
 	}
 
@@ -725,9 +779,25 @@ func tweetResultToItems(result any, num, count int, entryID string) []extractor.
 		return nil
 	}
 
-	// Retweet check
+	// Retweets: skipped unless enabled; when enabled the original tweet's
+	// media is emitted (the retweet wrapper itself carries no media) with
+	// IsRetweet set.
 	if rt, ok := legacy["retweeted_status_id_str"].(string); ok && rt != "" {
-		return nil // skip retweets at this level; caller can decide
+		if !opts.RetweetsEnabled {
+			return nil
+		}
+		if rs, _ := legacy["retweeted_status_result"].(map[string]any); rs != nil {
+			if inner, _ := rs["result"].(map[string]any); inner != nil {
+				items := tweetResultToItems(inner, num, count, entryID, opts)
+				for i := range items {
+					if items[i].Meta != nil {
+						items[i].Meta.IsRetweet = true
+					}
+				}
+				return items
+			}
+		}
+		return nil
 	}
 
 	tweetID, _ := legacy["id_str"].(string)
@@ -873,7 +943,7 @@ func tweetResultToItems(result any, num, count int, entryID string) []extractor.
 			if videoInfo != nil {
 				variants = arrOrNil(videoInfo["variants"])
 			}
-			mediaURL = bestVideoVariant(variants)
+			mediaURL = bestVideoVariant(variants, opts.VideoMaxBitrate)
 			if mediaURL == "" {
 				continue
 			}

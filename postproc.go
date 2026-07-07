@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // PostProcessor runs after a successful download. Implementations must be
@@ -132,10 +133,13 @@ func (p *RenamePostProcessor) OnFile(_ context.Context, path string, info *Media
 // ─── ZipPostProcessor ────────────────────────────────────────────────────────
 
 // ZipPostProcessor streams each downloaded file into a ZIP archive.
-// The zip file is created lazily on the first OnFile call.
+// The zip file is created lazily on the first OnFile call. A mutex guards the
+// writer: Download runs OnFile from concurrent goroutines and zip.Writer only
+// supports one entry being written at a time.
 type ZipPostProcessor struct {
 	nopPostProcessor
 	zipPath string
+	mu      sync.Mutex
 	zw      *zip.Writer
 	f       *os.File
 }
@@ -149,6 +153,8 @@ func NewZipPostProcessor(zipPath string) *ZipPostProcessor {
 }
 
 func (p *ZipPostProcessor) OnFile(_ context.Context, path string, _ *MediaInfo) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.zw == nil {
 		f, err := os.Create(p.zipPath)
 		if err != nil {
@@ -189,6 +195,8 @@ func (p *ZipPostProcessor) OnAfter(_ context.Context, _ string, _ *MediaInfo) er
 
 // Close finalises and closes the ZIP archive. Call when all files are done.
 func (p *ZipPostProcessor) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.zw != nil {
 		if err := p.zw.Close(); err != nil {
 			return err

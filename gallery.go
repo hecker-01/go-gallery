@@ -7,16 +7,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/hecker-01/go-gallery/internal/downloader"
 	"github.com/hecker-01/go-gallery/internal/extractor"
 	"github.com/hecker-01/go-gallery/internal/galleryerrs"
 	"github.com/hecker-01/go-gallery/internal/ratelimit"
@@ -58,6 +60,8 @@ func NewClient(opts ...Option) *Client {
 	}
 
 	// Build rate-limit registry after options so the callback is already set.
+	// All user-callback invocations go through the registry so a 429 fires the
+	// callback exactly once (On429 already invokes it).
 	origCb := c.rateLimitCb
 	rlReg := ratelimit.New(func(endpoint string, resetAt time.Time) {
 		if origCb != nil {
@@ -65,13 +69,7 @@ func NewClient(opts ...Option) *Client {
 		}
 	})
 	c.rlRegistry = rlReg
-	// Wrap rateLimitCb so 429 events also update the local registry.
-	c.rateLimitCb = func(endpoint string, resetAt time.Time) {
-		rlReg.On429(endpoint, resetAt)
-		if origCb != nil {
-			origCb(endpoint, resetAt)
-		}
-	}
+	c.rateLimitCb = rlReg.On429
 
 	if c.httpClient == nil {
 		transport := &http.Transport{
@@ -93,6 +91,23 @@ func NewClient(opts ...Option) *Client {
 			Timeout:   30 * time.Second,
 		}
 	}
+	// Config-supplied auth: inject auth_token / ct0 as cookies so they behave
+	// exactly like browser-extracted ones.
+	if c.cfg.Twitter.AuthToken != "" {
+		if c.jar == nil {
+			c.jar, _ = cookiejar.New(nil)
+		}
+		cookies := []*http.Cookie{{Name: "auth_token", Value: c.cfg.Twitter.AuthToken, Secure: true}}
+		if c.cfg.Twitter.CSRF != "" {
+			cookies = append(cookies, &http.Cookie{Name: "ct0", Value: c.cfg.Twitter.CSRF, Secure: true})
+		}
+		for _, domain := range []string{"https://x.com/", "https://twitter.com/"} {
+			if u, err := url.Parse(domain); err == nil {
+				c.jar.SetCookies(u, cookies)
+			}
+		}
+	}
+
 	if c.jar != nil {
 		c.httpClient.Jar = c.jar
 	}
@@ -161,6 +176,19 @@ func WithArchive(a Archive) Option {
 	return func(c *Client) { c.archive = a }
 }
 
+// WithCache injects a persistent session cache used for guest tokens, GraphQL
+// query IDs, and screen-name → user-ID lookups. Caching user IDs is the big
+// win: it avoids one UserByScreenName call (a tightly rate-limited endpoint)
+// per user URL. The caller owns the cache lifecycle; Client.Close does not
+// close it, so a single cache may be shared across many clients.
+func WithCache(cache Cache) Option {
+	return func(c *Client) {
+		if cache != nil {
+			c.cache = cache
+		}
+	}
+}
+
 // WithLogger sets the structured logger. The library never calls log.Fatal or
 // writes to stdout/stderr directly; all output goes through this logger.
 func WithLogger(l *slog.Logger) Option {
@@ -212,6 +240,12 @@ func (c *Client) Extract(ctx context.Context, url string) (<-chan Message, <-cha
 		RateLimitCB: c.rateLimitCb,
 		RateLimits:  c.rlRegistry,
 		Concurrency: c.concurrency,
+		Twitter: extractor.TwitterOptions{
+			GuestToken:      c.cfg.Twitter.GuestToken,
+			UserAgent:       c.cfg.Twitter.UserAgent,
+			RetweetsEnabled: c.cfg.Twitter.RetweetsEnabled,
+			VideoMaxBitrate: c.cfg.Twitter.VideoMaxBitrate,
+		},
 	}
 
 	ex, ok := extractor.Dispatch(url, params)
@@ -307,9 +341,36 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 		cfg.OutputDir = "."
 	}
 
+	// Custom io.Writer-based Downloader when injected; otherwise the internal
+	// file downloader, which adds retries with backoff, .part-file resumption,
+	// MIME sniffing (so an HTML error page is never saved as media), and
+	// min/max size validation.
 	dl := cfg.Downloader
+	var fileDL *downloader.HTTPDownloader
+	var fileDLCfg downloader.Config
+	var hlsDL *downloader.YTDLPDownloader
 	if dl == nil {
-		dl = &httpDownloader{client: c.httpClient}
+		hlsDL = downloader.NewYTDLP()
+		// Media transfers can outlast any fixed whole-request timeout, so the
+		// file downloader shares c.httpClient's transport (and cookie jar) but
+		// not its 30-second overall deadline. ctx cancellation still applies,
+		// and the transport's header/handshake timeouts stay in effect.
+		fileDL = downloader.New(&http.Client{
+			Transport: c.httpClient.Transport,
+			Jar:       c.httpClient.Jar,
+		})
+		fileDLCfg = downloader.Config{
+			Retries:     c.cfg.Downloader.Retries,
+			Resume:      c.cfg.Downloader.Resume,
+			MinFileSize: c.cfg.Downloader.MinFileSize,
+			MaxFileSize: c.cfg.Downloader.MaxFileSize,
+		}
+		if cfg.MinFileSize > 0 {
+			fileDLCfg.MinFileSize = cfg.MinFileSize
+		}
+		if cfg.MaxFileSize > 0 {
+			fileDLCfg.MaxFileSize = cfg.MaxFileSize
+		}
 	}
 
 	start := time.Now()
@@ -411,19 +472,8 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 				return
 			}
 
-			f, err := os.Create(destPath)
-			if err != nil {
-				mu.Lock()
-				result.FailedFiles++
-				result.Errors = append(result.Errors, err)
-				mu.Unlock()
-				return
-			}
-
 			for _, pp := range cfg.PostProcessors {
 				if err := pp.OnPrepare(ctx, mi); err != nil {
-					f.Close()
-					os.Remove(destPath)
 					mu.Lock()
 					result.FailedFiles++
 					result.Errors = append(result.Errors, err)
@@ -432,10 +482,30 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 				}
 			}
 
-			dlErr := dl.Download(ctx, mediaURL, f, cfg)
-			f.Close()
+			var dlErr error
+			switch {
+			case dl != nil:
+				f, err := os.Create(destPath)
+				if err != nil {
+					mu.Lock()
+					result.FailedFiles++
+					result.Errors = append(result.Errors, err)
+					mu.Unlock()
+					return
+				}
+				dlErr = dl.Download(ctx, mediaURL, f, cfg)
+				f.Close()
+				if dlErr != nil {
+					os.Remove(destPath)
+				}
+			case isHLSURL(mediaURL):
+				// HLS playlists (videos with no direct mp4 variant) need
+				// yt-dlp; the plain HTTP downloader would save playlist text.
+				dlErr = downloadHLS(ctx, hlsDL, mediaURL, destPath)
+			default:
+				dlErr = fileDL.DownloadToFile(ctx, mediaURL, destPath, fileDLCfg)
+			}
 			if dlErr != nil {
-				os.Remove(destPath)
 				mu.Lock()
 				// Classify permanent unavailability separately from transient failures.
 				var nfe *galleryerrs.NotFoundError
@@ -571,27 +641,34 @@ func (c *Client) RateLimitStatus(endpoint string) RateLimitInfo {
 	}
 }
 
-// httpDownloader is the default Downloader implementation used when none is
-// injected. It performs a simple streaming HTTP GET.
-type httpDownloader struct {
-	client *http.Client
+// isHLSURL reports whether rawURL points at an HLS playlist rather than a
+// direct media file.
+func isHLSURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return strings.HasSuffix(u.Path, ".m3u8")
 }
 
-func (d *httpDownloader) Download(ctx context.Context, rawURL string, dest io.Writer, _ DownloadConfig) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+// downloadHLS streams an HLS playlist to destPath via yt-dlp.
+func downloadHLS(ctx context.Context, y *downloader.YTDLPDownloader, rawURL, destPath string) error {
+	if !y.IsAvailable() {
+		return fmt.Errorf("HLS media requires yt-dlp, which was not found in PATH: %s", rawURL)
+	}
+	f, err := os.Create(destPath)
 	if err != nil {
 		return err
 	}
-	resp, err := d.client.Do(req)
+	err = y.Download(ctx, rawURL, f, downloader.Config{})
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
 	if err != nil {
+		os.Remove(destPath)
 		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return galleryerrs.ClassifyHTTPStatus(resp.StatusCode, rawURL, nil)
-	}
-	_, err = io.Copy(dest, resp.Body)
-	return err
+	return nil
 }
 
 // RateLimitInfo is a snapshot of a single endpoint's rate-limit state.

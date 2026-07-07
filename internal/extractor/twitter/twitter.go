@@ -5,13 +5,11 @@
 package twitter
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -34,6 +32,11 @@ const publicBearerToken = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZ
 const guestTokenURL = "https://api.x.com/1.1/guest/activate.json"
 const guestTokenCacheKey = "twitter:guest_token"
 const guestTokenTTL = 3 * time.Hour
+
+// userIDCacheTTL is how long screen-name → user-ID lookups stay cached.
+// User IDs are immutable, but a handle can be freed and re-registered by a
+// different account, so the mapping is not cached forever.
+const userIDCacheTTL = 90 * 24 * time.Hour
 
 // userAgent mimics a real browser to avoid trivial bot detection.
 const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -60,6 +63,15 @@ func newBase(rawURL string, params extractor.ClientParams) base {
 	}
 }
 
+// userAgent returns the configured User-Agent override, or the built-in
+// browser default.
+func (b *base) userAgent() string {
+	if b.Params.Twitter.UserAgent != "" {
+		return b.Params.Twitter.UserAgent
+	}
+	return userAgent
+}
+
 // randomCSRFToken generates a random 32-char hex CSRF token for guest-mode
 // requests. Twitter requires x-csrf-token on all GraphQL calls, even
 // unauthenticated ones; gallery-dl does the same.
@@ -79,6 +91,12 @@ func (b *base) ensureGuestToken(ctx context.Context) error {
 	// If the cookie jar already has an auth_token for x.com/twitter.com,
 	// we are in authenticated mode and do not need a guest token.
 	if b.hasAuthToken() {
+		return nil
+	}
+
+	// Config-supplied override.
+	if b.Params.Twitter.GuestToken != "" {
+		b.guestToken = b.Params.Twitter.GuestToken
 		return nil
 	}
 
@@ -108,6 +126,35 @@ func (b *base) ensureGuestToken(ctx context.Context) error {
 	return nil
 }
 
+// resolveUserID translates a screen name into the numeric user ID via the
+// UserByScreenName endpoint. Successful lookups are cached (see
+// userIDCacheTTL): the endpoint has a tight rate limit (150/15min), so a
+// cache hit saves one call per user URL.
+func (b *base) resolveUserID(ctx context.Context, screenName string) (string, error) {
+	cacheKey := "twitter:userid:" + strings.ToLower(screenName)
+	if b.Params.Cache != nil {
+		if v, ok, err := b.Params.Cache.Get(ctx, cacheKey); err == nil && ok && v != "" {
+			return v, nil
+		}
+	}
+
+	resp, err := b.graphQL(ctx, "UserByScreenName", map[string]any{
+		"screen_name":           screenName,
+		"withGrokTranslatedBio": false,
+	}, map[string]any{"withAuxiliaryUserLabels": true})
+	if err != nil {
+		return "", fmt.Errorf("resolve user %q: %w", screenName, err)
+	}
+	id, err := parseUserID(resp)
+	if err != nil {
+		return "", err
+	}
+	if b.Params.Cache != nil {
+		_ = b.Params.Cache.Set(ctx, cacheKey, id, userIDCacheTTL)
+	}
+	return id, nil
+}
+
 // hasAuthToken reports whether the cookie jar contains an auth_token cookie
 // for x.com or twitter.com (indicating an authenticated session).
 func (b *base) hasAuthToken() bool {
@@ -132,7 +179,7 @@ func (b *base) fetchGuestToken(ctx context.Context) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+publicBearerToken)
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", b.userAgent())
 
 	resp, err := b.Params.HTTP.Do(req)
 	if err != nil {
@@ -168,7 +215,7 @@ func (b *base) authHeaders() map[string]string {
 		"Sec-Fetch-Dest":            "empty",
 		"Sec-Fetch-Mode":            "cors",
 		"Sec-Fetch-Site":            "same-origin",
-		"User-Agent":                userAgent,
+		"User-Agent":                b.userAgent(),
 		"x-twitter-active-user":     "yes",
 		"x-twitter-client-language": "en",
 	}
@@ -208,74 +255,7 @@ func (b *base) doGet(ctx context.Context, rawURL string) (*http.Response, error)
 	return b.Get(ctx, rawURL, headers)
 }
 
-// doPost performs an authenticated POST with a JSON body.
-func (b *base) doPost(ctx context.Context, rawURL string, body any) (*http.Response, error) {
-	if err := b.ensureGuestToken(ctx); err != nil {
-		return nil, err
-	}
-
-	bodyBytes, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("twitter: marshal body: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, err
-	}
-	for k, v := range b.authHeaders() {
-		req.Header.Set(k, v)
-	}
-
-	resp, err := b.Params.HTTP.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	return resp, nil
-}
-
-// readJSON decodes the JSON body of resp into v.
-func readJSON(resp *http.Response, v any) error {
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(body, v)
-}
-
-// extractCt0 reads the ct0 cookie from the jar for twitter.com / x.com.
-func (b *base) extractCt0() string {
-	if b.Params.Cookies == nil {
-		return ""
-	}
-	for _, domain := range []string{"https://twitter.com/", "https://x.com/"} {
-		u, _ := url.Parse(domain)
-		for _, ck := range b.Params.Cookies.Cookies(u) {
-			if ck.Name == "ct0" {
-				return ck.Value
-			}
-		}
-	}
-	return ""
-}
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-// joinStrings converts []any to a comma-separated string (used for hashtags/mentions).
-func stringsFromAny(v any) []string {
-	arr, ok := v.([]any)
-	if !ok {
-		return nil
-	}
-	out := make([]string, 0, len(arr))
-	for _, item := range arr {
-		if s, ok := item.(string); ok {
-			out = append(out, s)
-		}
-	}
-	return out
-}
 
 // strOrEmpty returns the string value of v or "".
 func strOrEmpty(v any) string {
@@ -309,21 +289,36 @@ func parseTwitterDate(s string) time.Time {
 	return t
 }
 
-// bestVideoVariant picks the variant with the highest bitrate.
-func bestVideoVariant(variants []any) string {
-	var bestURL string
-	var bestBitrate float64
+// bestVideoVariant picks a video variant URL. maxBitrate selects the highest
+// bitrate; false selects the lowest. Variants without a bitrate (HLS .m3u8
+// playlists) are used only when no direct variant exists.
+func bestVideoVariant(variants []any, maxBitrate bool) string {
+	var bestURL, playlistURL string
+	bestBitrate := -1.0
 	for _, vv := range variants {
 		v, ok := vv.(map[string]any)
 		if !ok {
 			continue
 		}
-		bitrate, _ := v["bitrate"].(float64)
 		u, _ := v["url"].(string)
-		if u != "" && (bestURL == "" || bitrate > bestBitrate) {
-			bestURL = u
-			bestBitrate = bitrate
+		if u == "" {
+			continue
 		}
+		bitrate, _ := v["bitrate"].(float64)
+		if bitrate == 0 {
+			if playlistURL == "" {
+				playlistURL = u
+			}
+			continue
+		}
+		if bestBitrate < 0 ||
+			(maxBitrate && bitrate > bestBitrate) ||
+			(!maxBitrate && bitrate < bestBitrate) {
+			bestURL, bestBitrate = u, bitrate
+		}
+	}
+	if bestURL == "" {
+		return playlistURL
 	}
 	return bestURL
 }

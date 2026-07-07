@@ -151,13 +151,29 @@ func run() int {
 		gallery.WithLogger(logger),
 	}
 
+	cfg := gallery.DefaultConfig()
 	if *configPath != "" {
-		cfg, err := gallery.LoadConfig(*configPath)
+		loaded, err := gallery.LoadConfig(*configPath)
 		if err != nil {
 			logger.Error(fmt.Sprintf("failed to load config %s: %v", *configPath, err))
 			return 1
 		}
+		cfg = loaded
 		opts = append(opts, gallery.WithConfig(cfg))
+	}
+
+	// ── Session cache (guest tokens, query IDs, user-ID lookups) ─────────────
+	if cfg.Cache.Enabled {
+		cachePath := cfg.Cache.Path
+		if cachePath == "" {
+			cachePath = gallery.DefaultCachePath()
+		}
+		if cache, err := gallery.NewSQLiteCache(cachePath); err != nil {
+			logger.Warn(fmt.Sprintf("could not open session cache %s: %v", cachePath, err))
+		} else {
+			defer cache.Close()
+			opts = append(opts, gallery.WithCache(cache))
+		}
 	}
 
 	if *cookiesBrowser != "" {

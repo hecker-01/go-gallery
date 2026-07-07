@@ -171,6 +171,20 @@ Near-limit warnings appear before exhaustion so you can see it coming:
 [twitter][warning] twitter UserMedia near rate limit: 3/500 remaining (resets 2026-05-03T17:41:20Z)
 ```
 
+### Session cache
+
+The session cache (SQLite, at the platform cache dir by default) persists guest tokens, GraphQL query IDs, and screen-name → user-ID lookups across runs. User-ID caching matters most: `UserByScreenName` has a tight quota (150/15min authenticated), and with the cache each known user costs zero calls on that endpoint for 90 days. The CLI enables it automatically; library consumers opt in:
+
+```go
+cache, err := gallery.NewSQLiteCache(gallery.DefaultCachePath())
+if err == nil {
+    defer cache.Close()
+}
+client := gallery.NewClient(gallery.WithCache(cache)) // nil-safe
+```
+
+One cache may be shared across many clients; `Client.Close` does not close it.
+
 ---
 
 ## DMCA and Unavailable Content

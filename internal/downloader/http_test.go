@@ -256,3 +256,58 @@ func TestYTDLP_NotAvailable(t *testing.T) {
 		t.Errorf("expected ErrYTDLPNotFound, got %v", err)
 	}
 }
+
+func TestHTTPDownloader_RetriesDroppedTransfer(t *testing.T) {
+	// First request dies mid-body (Content-Length larger than what is sent);
+	// the retry serves the full payload. The dropped transfer surfaces as a
+	// plain io error, which isTransient must classify as retryable.
+	payload := makeJPEGPayload(4096)
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Content-Length", itoa(len(payload)))
+		if calls == 1 {
+			w.Write(payload[:1000])
+			return // connection ends short of Content-Length
+		}
+		w.Write(payload)
+	}))
+	defer srv.Close()
+
+	d := New(srv.Client())
+	dest := filepath.Join(t.TempDir(), "out.jpg")
+	if err := d.DownloadToFile(context.Background(), srv.URL, dest, Config{Retries: 2}); err != nil {
+		t.Fatalf("DownloadToFile: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 requests (1 drop + 1 retry), got %d", calls)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(payload) {
+		t.Errorf("file size = %d, want %d", len(got), len(payload))
+	}
+}
+
+func TestHTTPDownloader_MIMEReject_NoRetry(t *testing.T) {
+	// A wrong MIME type is permanent: retrying re-fetches the same error page.
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, "<html><body>error page</body></html>")
+	}))
+	defer srv.Close()
+
+	d := New(srv.Client())
+	dest := filepath.Join(t.TempDir(), "out.jpg")
+	if err := d.DownloadToFile(context.Background(), srv.URL, dest, Config{Retries: 3}); err == nil {
+		t.Error("expected MIME rejection, got nil")
+	}
+	if calls != 1 {
+		t.Errorf("expected exactly 1 request for MIME rejection (no retry), got %d", calls)
+	}
+}

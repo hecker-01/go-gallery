@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"sync"
 	"time"
-
-	"golang.org/x/time/rate"
 )
 
 // Snapshot is an immutable view of a single endpoint's current rate-limit state.
@@ -22,9 +20,9 @@ type Snapshot struct {
 // Callback is invoked after every header update and on every 429 hit.
 type Callback func(endpoint string, resetAt time.Time)
 
-// Registry maintains one rate.Limiter per GraphQL operation name.
-// Call Update after every Twitter API response to feed in the latest headers.
-// Call Wait before issuing the next request to that endpoint.
+// Registry maintains per-endpoint rate-limit state driven purely by response
+// headers. Call Update after every Twitter API response to feed in the latest
+// headers. Call Wait before issuing the next request to that endpoint.
 type Registry struct {
 	mu       sync.RWMutex
 	entries  map[string]*entry
@@ -33,7 +31,6 @@ type Registry struct {
 
 type entry struct {
 	mu        sync.Mutex
-	limiter   *rate.Limiter
 	limit     int
 	remaining int
 	resetAt   time.Time
@@ -66,7 +63,7 @@ func (r *Registry) Update(endpoint string, resp *http.Response) {
 		resetAt = time.Unix(resetUnix, 0)
 	}
 
-	e := r.getOrCreate(endpoint, limit)
+	e := r.getOrCreate(endpoint)
 	e.mu.Lock()
 	if limit > 0 {
 		e.limit = limit
@@ -87,12 +84,10 @@ func (r *Registry) Update(endpoint string, resp *http.Response) {
 // On429 records a 429 response for endpoint, setting the rate-limit pause
 // until resetAt. Subsequent Wait calls will block until that time.
 func (r *Registry) On429(endpoint string, resetAt time.Time) {
-	e := r.getOrCreate(endpoint, 0)
+	e := r.getOrCreate(endpoint)
 	e.mu.Lock()
 	e.remaining = 0
 	e.resetAt = resetAt
-	// Drain the limiter so Wait will sleep.
-	e.limiter.SetBurst(0)
 	e.mu.Unlock()
 
 	if r.callback != nil {
@@ -100,10 +95,10 @@ func (r *Registry) On429(endpoint string, resetAt time.Time) {
 	}
 }
 
-// Wait blocks until the endpoint's rate limiter allows a request, sleeping
-// through any active rate-limit window. It respects ctx cancellation.
+// Wait returns how long the caller should sleep before issuing the next
+// request to endpoint (zero when the request may proceed immediately).
 func (r *Registry) Wait(endpoint string, now time.Time) time.Duration {
-	e := r.getOrCreate(endpoint, 0)
+	e := r.getOrCreate(endpoint)
 	e.mu.Lock()
 	resetAt := e.resetAt
 	remaining := e.remaining
@@ -141,7 +136,7 @@ func (r *Registry) Status(endpoint string) Snapshot {
 	return s
 }
 
-func (r *Registry) getOrCreate(endpoint string, burst int) *entry {
+func (r *Registry) getOrCreate(endpoint string) *entry {
 	r.mu.RLock()
 	e, ok := r.entries[endpoint]
 	r.mu.RUnlock()
@@ -155,12 +150,7 @@ func (r *Registry) getOrCreate(endpoint string, burst int) *entry {
 	if e, ok = r.entries[endpoint]; ok {
 		return e
 	}
-	if burst <= 0 {
-		burst = 1
-	}
-	e = &entry{
-		limiter: rate.NewLimiter(rate.Inf, burst),
-	}
+	e = &entry{}
 	r.entries[endpoint] = e
 	return e
 }

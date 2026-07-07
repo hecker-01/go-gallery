@@ -109,10 +109,10 @@ func (d *HTTPDownloader) attemptDownload(ctx context.Context, url, destPath, par
 	if cl := resp.ContentLength; cl > 0 {
 		total := partSize + cl
 		if cfg.MinFileSize > 0 && total < cfg.MinFileSize {
-			return fmt.Errorf("content too small: %d bytes (min %d)", total, cfg.MinFileSize)
+			return permanent(fmt.Errorf("content too small: %d bytes (min %d)", total, cfg.MinFileSize))
 		}
 		if cfg.MaxFileSize > 0 && total > cfg.MaxFileSize {
-			return fmt.Errorf("content too large: %d bytes (max %d)", total, cfg.MaxFileSize)
+			return permanent(fmt.Errorf("content too large: %d bytes (max %d)", total, cfg.MaxFileSize))
 		}
 	}
 
@@ -147,10 +147,10 @@ func (d *HTTPDownloader) attemptDownload(ctx context.Context, url, destPath, par
 	mime := http.DetectContentType(sniff)
 	if !isAllowedMIME(mime) {
 		f.Close()
-		if !cfg.Resume {
-			os.Remove(partPath)
-		}
-		return fmt.Errorf("unexpected content type %q for %s", mime, url)
+		// A wrong MIME type means an error page was served; a stale .part of
+		// it must not be resumed, so remove it unconditionally.
+		os.Remove(partPath)
+		return permanent(fmt.Errorf("unexpected content type %q for %s", mime, url))
 	}
 
 	// Write the sniffed bytes then stream the rest.
@@ -181,13 +181,13 @@ func (d *HTTPDownloader) attemptDownload(ctx context.Context, url, destPath, par
 		if !cfg.Resume {
 			os.Remove(partPath)
 		}
-		return fmt.Errorf("downloaded file too small: %d bytes (min %d)", total, cfg.MinFileSize)
+		return permanent(fmt.Errorf("downloaded file too small: %d bytes (min %d)", total, cfg.MinFileSize))
 	}
 	if cfg.MaxFileSize > 0 && total > cfg.MaxFileSize {
 		if !cfg.Resume {
 			os.Remove(partPath)
 		}
-		return fmt.Errorf("downloaded file too large: %d bytes (max %d)", total, cfg.MaxFileSize)
+		return permanent(fmt.Errorf("downloaded file too large: %d bytes (max %d)", total, cfg.MaxFileSize))
 	}
 
 	return os.Rename(partPath, destPath)
@@ -211,13 +211,33 @@ func (d *HTTPDownloader) ContentLength(ctx context.Context, url string) (int64, 
 	return resp.ContentLength, nil
 }
 
-// isTransient reports whether err should trigger a retry.
-// Permanent failures (404, 403, 410, 451, 401) are not retried.
+// permanentError marks failures that retrying cannot fix, such as content
+// validation errors (wrong MIME type, size out of bounds).
+type permanentError struct{ err error }
+
+func (e *permanentError) Error() string { return e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
+// permanent wraps err so isTransient reports it as non-retryable.
+func permanent(err error) error { return &permanentError{err: err} }
+
+// isTransient reports whether err should trigger a retry. Anything not known
+// to be permanent is retried: the dominant real-world failure is a connection
+// dropped mid-transfer, which surfaces as a plain io error, so an allowlist of
+// "temporary" errors would miss it.
 func isTransient(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Permanent client-side errors - never retry these.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	// Permanent failures: validation errors and classified HTTP statuses
+	// (404, 403, 410, 451, 401).
+	var pe *permanentError
+	if errors.As(err, &pe) {
+		return false
+	}
 	var nfe *galleryerrs.NotFoundError
 	if errors.As(err, &nfe) {
 		return false
@@ -230,12 +250,7 @@ func isTransient(err error) bool {
 	if errors.As(err, &authnErr) {
 		return false
 	}
-	// Network-level errors that implement Temporary() are transient.
-	var e interface{ Temporary() bool }
-	if errors.As(err, &e) && e.Temporary() {
-		return true
-	}
-	return false
+	return true
 }
 
 // isAllowedMIME reports whether the MIME type is something we expect for

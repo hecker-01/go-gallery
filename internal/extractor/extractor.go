@@ -91,6 +91,22 @@ type KVCache interface {
 	Set(ctx context.Context, key, value string, ttl time.Duration) error
 }
 
+// TwitterOptions carries the Twitter-specific extractor settings from
+// gallery.TwitterConfig. The gallery package converts at the boundary to
+// avoid an import cycle.
+type TwitterOptions struct {
+	// GuestToken overrides the dynamically-fetched guest token.
+	GuestToken string
+	// UserAgent overrides the default browser User-Agent.
+	UserAgent string
+	// RetweetsEnabled emits media from retweets on timelines that include
+	// them (home, list, search). When false retweets are skipped.
+	RetweetsEnabled bool
+	// VideoMaxBitrate picks the highest-bitrate video variant; false picks
+	// the lowest.
+	VideoMaxBitrate bool
+}
+
 // ClientParams bundles the dependencies that an Extractor needs from the
 // calling gallery.Client. Using a plain struct avoids importing the gallery
 // package from within internal/extractor.
@@ -102,6 +118,7 @@ type ClientParams struct {
 	RateLimitCB func(endpoint string, resetAt time.Time)
 	RateLimits  *ratelimit.Registry
 	Concurrency int
+	Twitter     TwitterOptions
 }
 
 // ─── Extractor interface ─────────────────────────────────────────────────────

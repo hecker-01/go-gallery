@@ -21,8 +21,9 @@ const (
 	patTweet = `(?i)https?://(?:www\.)?(?:twitter|x)\.com/[A-Za-z0-9_]+/status/\d+`
 	// /{username}/likes
 	patLikes = `(?i)https?://(?:www\.)?(?:twitter|x)\.com/[A-Za-z0-9_]+/likes\b`
-	// /{username} and /{username}/media
-	patUser = `(?i)https?://(?:www\.)?(?:twitter|x)\.com/[A-Za-z0-9_]+(?:/media)?/?$`
+	// /{username} and /{username}/media, with an optional query string or
+	// fragment (e.g. ?s=20 share links); parseUserURL strips those.
+	patUser = `(?i)https?://(?:www\.)?(?:twitter|x)\.com/[A-Za-z0-9_]+(?:/media)?/?(?:[?#].*)?$`
 )
 
 func init() {

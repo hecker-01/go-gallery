@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"github.com/hecker-01/go-gallery/internal/extractor"
 )
@@ -79,17 +80,6 @@ func (e *TwitterUserExtractor) Items(ctx context.Context) <-chan extractor.Item 
 	return out
 }
 
-func (e *TwitterUserExtractor) resolveUserID(ctx context.Context, screenName string) (string, error) {
-	resp, err := e.graphQL(ctx, "UserByScreenName", map[string]any{
-		"screen_name":           screenName,
-		"withGrokTranslatedBio": false,
-	}, map[string]any{"withAuxiliaryUserLabels": true})
-	if err != nil {
-		return "", fmt.Errorf("resolve user %q: %w", screenName, err)
-	}
-	return parseUserID(resp)
-}
-
 func (e *TwitterUserExtractor) fetchUserPage(ctx context.Context, userID, operation, cursor string) ([]extractor.Item, string, error) {
 	vars := map[string]any{
 		"userId":                 userID,
@@ -110,12 +100,14 @@ func (e *TwitterUserExtractor) fetchUserPage(ctx context.Context, userID, operat
 	if err != nil {
 		return nil, "", err
 	}
-	if e.Params.Logger != nil && vars["cursor"] != nil {
+	// Enabled check required: marshalling the full response is expensive and
+	// must not run when debug logging is off.
+	if e.Params.Logger != nil && vars["cursor"] != nil && e.Params.Logger.Enabled(ctx, slog.LevelDebug) {
 		if raw, jerr := json.Marshal(resp); jerr == nil {
 			e.Params.Logger.Debug(fmt.Sprintf("%s raw page response: %s", operation, string(raw)))
 		}
 	}
-	items, cursor, err := parseTweetTimeline(resp)
+	items, cursor, err := parseTweetTimeline(resp, e.Params.Twitter)
 	if err != nil {
 		return nil, "", err
 	}

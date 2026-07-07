@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -43,7 +44,13 @@ type SQLiteCache struct {
 	set   *sql.Stmt
 	del   *sql.Stmt
 	purge *sql.Stmt
+	// lastPurge is the unix time of the last expired-row sweep; long-running
+	// processes purge again periodically from Set instead of only at open.
+	lastPurge atomic.Int64
 }
+
+// purgeInterval is how often Set sweeps expired rows.
+const purgeInterval = 15 * time.Minute
 
 const cacheSchema = `
 CREATE TABLE IF NOT EXISTS cache (
@@ -104,6 +111,7 @@ func NewSQLiteCache(path string) (*SQLiteCache, error) {
 	c := &SQLiteCache{db: db, get: get, set: set, del: del, purge: purge}
 	// Eagerly evict expired entries.
 	_, _ = c.purge.Exec(time.Now().Unix())
+	c.lastPurge.Store(time.Now().Unix())
 	return c, nil
 }
 
@@ -120,7 +128,12 @@ func (c *SQLiteCache) Get(ctx context.Context, key string) (string, bool, error)
 }
 
 func (c *SQLiteCache) Set(ctx context.Context, key, value string, ttl time.Duration) error {
-	expires := time.Now().Add(ttl).Unix()
+	now := time.Now()
+	if last := c.lastPurge.Load(); now.Unix()-last >= int64(purgeInterval.Seconds()) &&
+		c.lastPurge.CompareAndSwap(last, now.Unix()) {
+		_, _ = c.purge.ExecContext(ctx, now.Unix())
+	}
+	expires := now.Add(ttl).Unix()
 	_, err := c.set.ExecContext(ctx, key, value, expires)
 	if err != nil {
 		return fmt.Errorf("cache: set %q: %w", key, err)

@@ -58,5 +58,5 @@ func (e *TwitterBookmarksExtractor) fetchBookmarksPage(ctx context.Context, curs
 	if err != nil {
 		return nil, "", err
 	}
-	return parseBookmarks(resp)
+	return parseBookmarks(resp, e.Params.Twitter)
 }

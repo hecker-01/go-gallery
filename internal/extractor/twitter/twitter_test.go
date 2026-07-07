@@ -170,7 +170,7 @@ func TestTweetResultToItems_Photo(t *testing.T) {
 		},
 	}
 
-	items := tweetResultToItems(result, 1, 1, "")
+	items := tweetResultToItems(result, 1, 1, "", twOpts{VideoMaxBitrate: true})
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want 1", len(items))
 	}
@@ -240,7 +240,7 @@ func TestTweetResultToItems_Video(t *testing.T) {
 		},
 	}
 
-	items := tweetResultToItems(result, 1, 1, "")
+	items := tweetResultToItems(result, 1, 1, "", twOpts{VideoMaxBitrate: true})
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want 1", len(items))
 	}
@@ -265,7 +265,7 @@ func TestTweetResultToItems_Tombstone(t *testing.T) {
 		},
 	}
 
-	items := tweetResultToItems(result, 0, 0, "tweet-1234567890")
+	items := tweetResultToItems(result, 0, 0, "tweet-1234567890", twOpts{VideoMaxBitrate: true})
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want 1 (KindSkipped)", len(items))
 	}
@@ -291,7 +291,7 @@ func TestTweetResultToItems_TombstoneGeneric(t *testing.T) {
 		},
 	}
 
-	items := tweetResultToItems(result, 0, 0, "tweet-999")
+	items := tweetResultToItems(result, 0, 0, "tweet-999", twOpts{VideoMaxBitrate: true})
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want 1 (KindSkipped)", len(items))
 	}
@@ -305,7 +305,7 @@ func TestTweetResultToItems_TombstoneGeneric(t *testing.T) {
 
 func TestTweetTimeline_ContainsTombstone(t *testing.T) {
 	fixture := tweetTimelineWithTombstone()
-	items, _, err := parseTweetTimeline(fixture)
+	items, _, err := parseTweetTimeline(fixture, twOpts{VideoMaxBitrate: true})
 	if err != nil {
 		t.Fatalf("parseTweetTimeline: %v", err)
 	}
@@ -389,6 +389,83 @@ func TestGraphQL_HTTP401_ReturnsAuthenticationError(t *testing.T) {
 	var authnErr *galleryerrs.AuthenticationError
 	if !errors.As(err, &authnErr) {
 		t.Errorf("want *AuthenticationError, got %T: %v", err, err)
+	}
+}
+
+// ─── User-ID cache ────────────────────────────────────────────────────────────
+
+// mapCache is an in-memory KVCache for tests. TTLs are ignored.
+type mapCache struct{ m map[string]string }
+
+func newMapCache() *mapCache { return &mapCache{m: map[string]string{}} }
+
+func (c *mapCache) Get(_ context.Context, key string) (string, bool, error) {
+	v, ok := c.m[key]
+	return v, ok, nil
+}
+func (c *mapCache) Set(_ context.Context, key, value string, _ time.Duration) error {
+	c.m[key] = value
+	return nil
+}
+func (c *mapCache) Delete(_ context.Context, key string) error {
+	delete(c.m, key)
+	return nil
+}
+func (c *mapCache) Close() error { return nil }
+
+func TestResolveUserID_CacheHitSkipsAPI(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected API call %s; cached user ID should have been used", r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cache := newMapCache()
+	cache.m["twitter:userid:testuser"] = "42"
+
+	params := extractor.ClientParams{HTTP: srv.Client(), Cache: cache}
+	b := newBase("https://twitter.com/TestUser", params)
+	b.guestToken = "test"
+	b.endpointBase = srv.URL
+
+	// Mixed case must hit the lowercased cache key.
+	id, err := b.resolveUserID(context.Background(), "TestUser")
+	if err != nil {
+		t.Fatalf("resolveUserID: %v", err)
+	}
+	if id != "42" {
+		t.Errorf("id = %q, want %q", id, "42")
+	}
+}
+
+func TestResolveUserID_CacheMissResolvesAndStores(t *testing.T) {
+	srv := httptest.NewServer(jsonBody(map[string]any{
+		"data": map[string]any{
+			"user": map[string]any{
+				"result": map[string]any{
+					"rest_id": "123456",
+					"legacy":  map[string]any{"id_str": "123456"},
+				},
+			},
+		},
+	}))
+	defer srv.Close()
+
+	cache := newMapCache()
+	params := extractor.ClientParams{HTTP: srv.Client(), Cache: cache}
+	b := newBase("https://twitter.com/TestUser", params)
+	b.guestToken = "test"
+	b.endpointBase = srv.URL
+
+	id, err := b.resolveUserID(context.Background(), "TestUser")
+	if err != nil {
+		t.Fatalf("resolveUserID: %v", err)
+	}
+	if id != "123456" {
+		t.Errorf("id = %q, want %q", id, "123456")
+	}
+	if got := cache.m["twitter:userid:testuser"]; got != "123456" {
+		t.Errorf("cached id = %q, want %q", got, "123456")
 	}
 }
 
@@ -613,4 +690,123 @@ func contains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestGraphQL_404RefreshesQueryID(t *testing.T) {
+	var oldHits, newHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case contains(r.URL.Path, "/OLDID/"):
+			oldHits++
+			w.WriteHeader(http.StatusNotFound)
+		case contains(r.URL.Path, "/NEWID/"):
+			newHits++
+			jsonBody(map[string]any{"data": map[string]any{"user": map[string]any{}}})(w, r)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	// Pre-populate the process-wide refreshed-ID state so the test exercises
+	// the 404→retry path without scraping the real x.com bundles.
+	qidFetch.mu.Lock()
+	savedAt, savedIDs := qidFetch.at, qidFetch.ids
+	qidFetch.at = time.Now()
+	qidFetch.ids = map[string]string{"UserTweets": "NEWID"}
+	qidFetch.mu.Unlock()
+	defer func() {
+		qidFetch.mu.Lock()
+		qidFetch.at, qidFetch.ids = savedAt, savedIDs
+		qidFetch.mu.Unlock()
+	}()
+
+	cache := newMapCache()
+	cache.m[qidCacheKey("UserTweets")] = "OLDID"
+	params := extractor.ClientParams{HTTP: srv.Client(), Cache: cache}
+	b := newBase("https://twitter.com/testuser", params)
+	b.guestToken = "test"
+	b.endpointBase = srv.URL
+
+	if _, err := b.graphQL(context.Background(), "UserTweets", map[string]any{"userId": "1"}); err != nil {
+		t.Fatalf("graphQL after query-ID refresh: %v", err)
+	}
+	if oldHits != 1 || newHits != 1 {
+		t.Errorf("hits: old=%d new=%d, want 1 each", oldHits, newHits)
+	}
+}
+
+func TestFetchQueryIDs_Parsing(t *testing.T) {
+	html := `<script src="https://abs.twimg.com/responsive-web/client-web/main.abc123.js"></script>`
+	if got := bundleURLRe.FindAllString(html, -1); len(got) != 1 {
+		t.Errorf("bundleURLRe found %d URLs, want 1", len(got))
+	}
+	js := `{queryId:"aBc-123_x",operationName:"UserMedia",operationType:"query"},{queryId:"zZz",operationName:"UserTweets"}`
+	ids := map[string]string{}
+	for _, m := range queryIDRe.FindAllStringSubmatch(js, -1) {
+		ids[m[2]] = m[1]
+	}
+	if ids["UserMedia"] != "aBc-123_x" || ids["UserTweets"] != "zZz" {
+		t.Errorf("parsed ids = %v", ids)
+	}
+}
+
+func TestTweetResultToItems_Retweet(t *testing.T) {
+	result := map[string]any{
+		"__typename": "Tweet",
+		"legacy": map[string]any{
+			"id_str":                  "555",
+			"retweeted_status_id_str": "111",
+			"retweeted_status_result": map[string]any{
+				"result": map[string]any{
+					"__typename": "Tweet",
+					"legacy": map[string]any{
+						"id_str":     "111",
+						"created_at": "Mon Jan 02 15:04:05 +0000 2023",
+						"full_text":  "original",
+						"extended_entities": map[string]any{
+							"media": []any{
+								map[string]any{
+									"type":            "photo",
+									"media_url_https": "https://pbs.twimg.com/media/orig.jpg",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if items := tweetResultToItems(result, 0, 0, "", twOpts{}); len(items) != 0 {
+		t.Errorf("retweets disabled: got %d items, want 0", len(items))
+	}
+	items := tweetResultToItems(result, 0, 0, "", twOpts{RetweetsEnabled: true})
+	if len(items) != 1 {
+		t.Fatalf("retweets enabled: got %d items, want 1", len(items))
+	}
+	if !items[0].Meta.IsRetweet {
+		t.Error("IsRetweet should be true")
+	}
+	if items[0].Meta.TweetID != "111" {
+		t.Errorf("TweetID = %q, want the original tweet's ID 111", items[0].Meta.TweetID)
+	}
+}
+
+func TestBestVideoVariant(t *testing.T) {
+	variants := []any{
+		map[string]any{"url": "https://v/playlist.m3u8"},
+		map[string]any{"bitrate": float64(832000), "url": "https://v/low.mp4"},
+		map[string]any{"bitrate": float64(2176000), "url": "https://v/high.mp4"},
+	}
+	if got := bestVideoVariant(variants, true); got != "https://v/high.mp4" {
+		t.Errorf("max: got %q", got)
+	}
+	if got := bestVideoVariant(variants, false); got != "https://v/low.mp4" {
+		t.Errorf("min: got %q", got)
+	}
+	only := []any{map[string]any{"url": "https://v/playlist.m3u8"}}
+	if got := bestVideoVariant(only, true); got != "https://v/playlist.m3u8" {
+		t.Errorf("m3u8-only fallback: got %q", got)
+	}
 }

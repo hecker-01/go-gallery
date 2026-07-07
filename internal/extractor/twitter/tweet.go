@@ -55,7 +55,7 @@ func (e *TwitterTweetExtractor) Items(ctx context.Context) <-chan extractor.Item
 			return
 		}
 
-		items, err := parseTweetDetail(resp)
+		items, err := parseTweetDetail(resp, e.tweetID, e.Params.Twitter)
 		if err != nil {
 			if e.Params.Logger != nil {
 				e.Params.Logger.Error(fmt.Sprintf("failed to parse TweetDetail for %s: %v", e.tweetID, err))
@@ -74,23 +74,3 @@ func (e *TwitterTweetExtractor) Items(ctx context.Context) <-chan extractor.Item
 	return out
 }
 
-// resolveTweetAuthor returns the screen name from a tweet URL.
-func resolveTweetAuthor(rawURL string) string {
-	for _, prefix := range []string{
-		"https://twitter.com/", "http://twitter.com/",
-		"https://x.com/", "http://x.com/",
-		"https://www.twitter.com/", "https://www.x.com/",
-	} {
-		if len(rawURL) > len(prefix) && rawURL[:len(prefix)] == prefix {
-			path := rawURL[len(prefix):]
-			parts := splitPath(path)
-			if len(parts) > 0 {
-				return parts[0]
-			}
-		}
-	}
-	return ""
-}
-
-// unused but demonstrates discoverability
-var _ = fmt.Sprintf

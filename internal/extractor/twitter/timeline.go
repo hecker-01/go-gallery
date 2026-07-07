@@ -61,5 +61,5 @@ func (e *TwitterTimelineExtractor) fetchTimelinePage(ctx context.Context, cursor
 	if err != nil {
 		return nil, "", err
 	}
-	return parseHomeTimeline(resp)
+	return parseHomeTimeline(resp, e.Params.Twitter)
 }

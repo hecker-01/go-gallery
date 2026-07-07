@@ -67,5 +67,5 @@ func (e *TwitterListExtractor) fetchListPage(ctx context.Context, cursor string)
 	if err != nil {
 		return nil, "", err
 	}
-	return parseListTimeline(resp)
+	return parseListTimeline(resp, e.Params.Twitter)
 }

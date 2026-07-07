@@ -56,17 +56,6 @@ func (e *TwitterLikesExtractor) Items(ctx context.Context) <-chan extractor.Item
 	return out
 }
 
-func (e *TwitterLikesExtractor) resolveUserID(ctx context.Context, screenName string) (string, error) {
-	resp, err := e.graphQL(ctx, "UserByScreenName", map[string]any{
-		"screen_name":           screenName,
-		"withGrokTranslatedBio": false,
-	}, map[string]any{"withAuxiliaryUserLabels": true})
-	if err != nil {
-		return "", fmt.Errorf("resolve user %q: %w", screenName, err)
-	}
-	return parseUserID(resp)
-}
-
 func (e *TwitterLikesExtractor) fetchLikesPage(ctx context.Context, userID, cursor string) ([]extractor.Item, string, error) {
 	vars := map[string]any{
 		"userId":                 userID,
@@ -81,5 +70,5 @@ func (e *TwitterLikesExtractor) fetchLikesPage(ctx context.Context, userID, curs
 	if err != nil {
 		return nil, "", err
 	}
-	return parseLikes(resp)
+	return parseLikes(resp, e.Params.Twitter)
 }
