@@ -35,9 +35,11 @@ func (e *TwitterSearchExtractor) Items(ctx context.Context) <-chan extractor.Ite
 	go func() {
 		defer close(out)
 
+		pageErr := make(chan error, 1)
 		for item := range extractor.Paginate(ctx, func(ctx context.Context, cursor string) ([]extractor.Item, string, error) {
 			return e.fetchSearchPage(ctx, cursor)
 		}, func(err error) {
+			pageErr <- err
 			if e.Params.Logger != nil {
 				e.Params.Logger.Error(fmt.Sprintf("fetch search page failed for %q: %v", e.query, err))
 			}
@@ -47,6 +49,11 @@ func (e *TwitterSearchExtractor) Items(ctx context.Context) <-chan extractor.Ite
 			case <-ctx.Done():
 				return
 			}
+		}
+		select {
+		case err := <-pageErr:
+			extractor.SendError(ctx, out, err)
+		default:
 		}
 	}()
 	return out

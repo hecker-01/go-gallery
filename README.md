@@ -335,3 +335,18 @@ make clean
 ## License
 
 See [LICENSE](LICENSE).
+
+
+## Smart refresh and recovery
+
+`WithStopAfterExisting(1)` stops extraction at the first nonempty regular destination file or archive hit, in timeline order. Zero (the default) scans normally. Already accepted downloads and metadata backfills finish; caller cancellation still cancels the entire operation. `Result.StoppedEarly` distinguishes this successful boundary from an error. This heuristic does not guarantee discovery of older gaps.
+
+Use `WithDownloadObserver(func(DownloadEvent))` for progress instead of parsing logs. Events distinguish completed media, existing files, archive hits, unavailable media, and failures, with media identity, path, bytes, reason, and error where applicable. Callbacks are serialized per download, outside accounting locks, and must return promptly. Post-processing failures are reported separately from completed media transfers.
+
+Construct a `NewRateLimitRegistry()` per authentication session and pass it to all related clients using `WithRateLimitRegistry`. GraphQL requests share per-endpoint budgets; media downloads and different endpoints remain concurrent. `Snapshots()` exposes the current budget and wait state. Do not share a registry between unrelated accounts. Omitting the option retains a private registry per client.
+
+Every non-simulated media transfer writes a `RepairRecord` under the output directory's `.twdl/repairs` before starting. Successful finalization removes it. `LoadRepairRecords`, `SaveRepairRecord`, and `RemoveRepairRecord` support recovery tools; records contain media identity and the destination, not credentials or expiring CDN URLs. `WithRepair(record)` selects the recorded post/media index, preserves the destination, and bypasses archive skipping. Resolve it through the source post URL to obtain fresh media URLs. `WithRepairDestinations(paths)` bypasses archive hits only for those known repair paths during a fallback scan.
+
+Library downloads retain normal `.part` resumption. HTTP 206 ranges are validated before append, a server ignoring Range triggers a fresh transfer, and 416 never promotes unverified partial bytes to a completed file. twdl adds stale-part deletion and targeted repair before refresh. Output and repair paths reject traversal and linked components.
+
+`Extract` reports startup and pagination failures on its existing error channel. `Download` returns partial results alongside extraction errors and returns caller cancellation explicitly. `UserLookupError` identifies account-resolution failures while preserving typed causes for `errors.As`; `AccountUnavailableError` identifies explicit account-level API codes; a missing GraphQL endpoint, missing post, or malformed response must not be mistaken for a deleted account.

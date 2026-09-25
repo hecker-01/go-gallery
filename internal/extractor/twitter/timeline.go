@@ -28,9 +28,11 @@ func (e *TwitterTimelineExtractor) Items(ctx context.Context) <-chan extractor.I
 	go func() {
 		defer close(out)
 
+		pageErr := make(chan error, 1)
 		for item := range extractor.Paginate(ctx, func(ctx context.Context, cursor string) ([]extractor.Item, string, error) {
 			return e.fetchTimelinePage(ctx, cursor)
 		}, func(err error) {
+			pageErr <- err
 			if e.Params.Logger != nil {
 				e.Params.Logger.Error(fmt.Sprintf("fetch home timeline page failed: %v", err))
 			}
@@ -40,6 +42,11 @@ func (e *TwitterTimelineExtractor) Items(ctx context.Context) <-chan extractor.I
 			case <-ctx.Done():
 				return
 			}
+		}
+		select {
+		case err := <-pageErr:
+			extractor.SendError(ctx, out, err)
+		default:
 		}
 	}()
 	return out

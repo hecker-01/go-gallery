@@ -199,6 +199,7 @@ func (m *MediaInfo) MarshalJSON() ([]byte, error) {
 
 // Result is returned by Client.Download summarising the completed operation.
 type Result struct {
+	StoppedEarly     bool
 	TotalFiles       int
 	SkippedFiles     int // archive hits
 	FailedFiles      int
@@ -272,7 +273,11 @@ func (r Range) String() string { return r.raw }
 
 // DownloadConfig holds the resolved configuration for a single Download call.
 type DownloadConfig struct {
-	OutputDir string
+	RepairDestinations []string
+	Observer           func(DownloadEvent)
+	StopAfterExisting  int
+	Repair             *RepairRecord
+	OutputDir          string
 	// FlatDir, when true, strips any directory components from the formatted
 	// filename so files land directly in OutputDir with no subdirectories.
 	// Equivalent to gallery-dl's -D flag.
@@ -367,4 +372,38 @@ func WithUserProfile(overwrite bool) DownloadOption {
 // the interface is public so consumers can substitute their own.
 type Downloader interface {
 	Download(ctx context.Context, url string, dest io.Writer, opts DownloadConfig) error
+}
+
+// DownloadEvent is an accounting event. Observers are serialized per Download,
+// outside accounting locks, and must return promptly. Info is read-only.
+type DownloadEvent struct {
+	Kind   string
+	Info   *MediaInfo
+	Path   string
+	Bytes  int64
+	Reason string
+	Err    error
+}
+
+const (
+	EventExisting    = "existing"
+	EventArchive     = "archive"
+	EventUnavailable = "unavailable"
+	EventCompleted   = "completed"
+	EventFailed      = "failed"
+)
+
+func WithDownloadObserver(fn func(DownloadEvent)) DownloadOption {
+	return func(c *DownloadConfig) { c.Observer = fn }
+}
+func WithStopAfterExisting(n int) DownloadOption {
+	return func(c *DownloadConfig) { c.StopAfterExisting = n }
+}
+
+// WithRepair selects one media item and preserves its destination, bypassing archive hits.
+func WithRepair(r RepairRecord) DownloadOption { return func(c *DownloadConfig) { c.Repair = &r } }
+
+// WithRepairDestinations bypasses archive entries only for pending repair paths.
+func WithRepairDestinations(paths []string) DownloadOption {
+	return func(c *DownloadConfig) { c.RepairDestinations = append([]string(nil), paths...) }
 }

@@ -37,9 +37,11 @@ func (e *TwitterListExtractor) Items(ctx context.Context) <-chan extractor.Item 
 	go func() {
 		defer close(out)
 
+		pageErr := make(chan error, 1)
 		for item := range extractor.Paginate(ctx, func(ctx context.Context, cursor string) ([]extractor.Item, string, error) {
 			return e.fetchListPage(ctx, cursor)
 		}, func(err error) {
+			pageErr <- err
 			if e.Params.Logger != nil {
 				e.Params.Logger.Error(fmt.Sprintf("fetch list page failed (list %s): %v", e.listID, err))
 			}
@@ -49,6 +51,11 @@ func (e *TwitterListExtractor) Items(ctx context.Context) <-chan extractor.Item 
 			case <-ctx.Done():
 				return
 			}
+		}
+		select {
+		case err := <-pageErr:
+			extractor.SendError(ctx, out, err)
+		default:
 		}
 	}()
 	return out

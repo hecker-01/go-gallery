@@ -47,3 +47,9 @@ var AbortExtraction = galleryerrs.AbortExtraction
 
 // TerminateExtraction hard-cancels everything, including in-flight downloads.
 var TerminateExtraction = galleryerrs.TerminateExtraction
+
+// UserLookupError wraps an account lookup failure and preserves its typed cause.
+type UserLookupError = galleryerrs.UserLookupError
+
+// AccountUnavailableError identifies explicit user-not-found/suspended API responses.
+type AccountUnavailableError = galleryerrs.AccountUnavailableError

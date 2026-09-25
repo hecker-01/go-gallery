@@ -300,7 +300,15 @@ func (b *base) doGet(ctx context.Context, rawURL string) (*http.Response, error)
 		return nil, err
 	}
 	headers := b.authHeaders()
-	return b.Get(ctx, rawURL, headers)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	// GraphQL owns retries so every attempt acquires the shared endpoint budget.
+	return b.Params.HTTP.Do(req)
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

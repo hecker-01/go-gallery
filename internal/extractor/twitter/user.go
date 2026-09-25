@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/hecker-01/go-gallery/internal/extractor"
+	"github.com/hecker-01/go-gallery/internal/galleryerrs"
 )
 
 // TwitterUserExtractor handles:
@@ -50,6 +51,7 @@ func (e *TwitterUserExtractor) Items(ctx context.Context) <-chan extractor.Item 
 		// needed for pagination and the profile metadata emitted below.
 		user, err := e.resolveUser(ctx, e.screenName, e.Params.Twitter.ForceUserRefresh)
 		if err != nil {
+			extractor.SendError(ctx, out, &galleryerrs.UserLookupError{Err: err})
 			if e.Params.Logger != nil {
 				e.Params.Logger.Error(fmt.Sprintf("failed to resolve user %q: %v", e.screenName, err))
 			}
@@ -75,9 +77,11 @@ func (e *TwitterUserExtractor) Items(ctx context.Context) <-chan extractor.Item 
 
 		operation := "UserMedia"
 
+		pageErr := make(chan error, 1)
 		for item := range extractor.Paginate(ctx, func(ctx context.Context, cursor string) ([]extractor.Item, string, error) {
 			return e.fetchUserPage(ctx, userID, operation, cursor)
 		}, func(err error) {
+			pageErr <- err
 			if e.Params.Logger != nil {
 				e.Params.Logger.Error(fmt.Sprintf("fetch %s page failed: %v", operation, err))
 			}
@@ -87,6 +91,11 @@ func (e *TwitterUserExtractor) Items(ctx context.Context) <-chan extractor.Item 
 			case <-ctx.Done():
 				return
 			}
+		}
+		select {
+		case err := <-pageErr:
+			extractor.SendError(ctx, out, err)
+		default:
 		}
 	}()
 	return out

@@ -151,17 +151,21 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 	var lastRateLimitErr error
 	qidRefreshed := false
 	for attempt := 0; attempt <= maxRateLimitRetries; attempt++ {
+		if attempt > 0 {
+			timer := time.NewTimer(time.Duration(1<<min(attempt-1, 5)) * time.Second)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			}
+		}
+		release := func() {}
 		if b.Params.RateLimits != nil {
-			if wait := b.Params.RateLimits.Wait(operation, time.Now()); wait > 0 {
-				if b.Params.Logger != nil {
-					b.Params.Logger.Info(fmt.Sprintf("rate-limit window exhausted for %s; sleeping %s",
-						operation, wait.Round(time.Second)))
-				}
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(wait + 500*time.Millisecond):
-				}
+			var err error
+			release, err = b.Params.RateLimits.Acquire(ctx, operation)
+			if err != nil {
+				return nil, err
 			}
 		}
 
@@ -174,6 +178,18 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, 60*time.Second)
 		resp, err := b.doGet(attemptCtx, reqURL)
+		if resp != nil && b.Params.RateLimits != nil {
+			b.Params.RateLimits.Update(operation, resp)
+			if resp.StatusCode == http.StatusTooManyRequests {
+				b.Params.RateLimits.On429(operation, parseRateLimitReset(resp))
+			}
+		}
+		release()
+		if resp != nil && resp.StatusCode != http.StatusTooManyRequests && b.Params.RateLimitCB != nil && b.Params.RateLimits != nil {
+			if snap := b.Params.RateLimits.Status(operation); !snap.ResetAt.IsZero() {
+				b.Params.RateLimitCB(operation, snap.ResetAt)
+			}
+		}
 		elapsed := time.Since(reqStart)
 
 		if err != nil {
@@ -191,6 +207,10 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 				lastRateLimitErr = err
 				continue
 			}
+			if ctx.Err() == nil && attempt < maxRateLimitRetries {
+				lastRateLimitErr = err
+				continue
+			}
 			return nil, fmt.Errorf("twitter graphql %s: %w", operation, err)
 		}
 
@@ -202,16 +222,15 @@ func (b *base) graphQL(ctx context.Context, operation string, variables map[stri
 		// deferred: a deferred close would stack once per retry attempt and,
 		// worse, hold the 429 response open through a many-minute sleep.
 
-		if b.Params.RateLimits != nil {
-			b.Params.RateLimits.Update(operation, resp)
-			if s := b.Params.RateLimits.Status(operation); s.Limit > 0 && s.Remaining > 0 && s.Remaining <= 3 {
-				if b.Params.Logger != nil {
-					b.Params.Logger.Warn(fmt.Sprintf("twitter %s near rate limit: %d/%d remaining (resets %s)",
-						operation, s.Remaining, s.Limit, s.ResetAt.UTC().Format(time.RFC3339)))
-				}
+		if resp.StatusCode >= 500 {
+			resp.Body.Close()
+			attemptCancel()
+			lastRateLimitErr = galleryerrs.ClassifyHTTPStatus(resp.StatusCode, operation, nil)
+			if attempt < maxRateLimitRetries {
+				continue
 			}
+			return nil, lastRateLimitErr
 		}
-
 		if resp.StatusCode == http.StatusUnauthorized {
 			resp.Body.Close()
 			attemptCancel()
@@ -346,7 +365,7 @@ func parseUserID(resp map[string]any) (string, error) {
 			msg, _ := first["message"].(string)
 			switch code {
 			case 50, 63: // User not found / suspended
-				return "", &galleryerrs.NotFoundError{Reason: "suspended", URL: msg}
+				return "", &galleryerrs.AccountUnavailableError{Reason: "suspended", URL: msg}
 			case 144: // No status with that ID
 				return "", &galleryerrs.NotFoundError{Reason: "deleted", URL: msg}
 			case 32: // Could not authenticate
@@ -374,15 +393,15 @@ func parseUserID(resp map[string]any) (string, error) {
 		}
 		return "", fmt.Errorf("UserByScreenName: %w", err)
 	}
-	legacy, err := dig(user, "legacy")
-	if err != nil {
-		return "", fmt.Errorf("UserByScreenName: %w", err)
+	m, ok := user.(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("UserByScreenName: invalid user result")
 	}
-	id, ok := legacy.(map[string]any)["id_str"].(string)
-	if !ok || id == "" {
-		// Try rest_id
-		m, _ := user.(map[string]any)
-		id, _ = m["rest_id"].(string)
+	id, _ := m["rest_id"].(string)
+	if id == "" {
+		if legacy, ok := m["legacy"].(map[string]any); ok {
+			id, _ = legacy["id_str"].(string)
+		}
 	}
 	if id == "" {
 		return "", fmt.Errorf("UserByScreenName: could not find user ID")

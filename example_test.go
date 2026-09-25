@@ -21,11 +21,23 @@ func Example_downloadUserMedia() {
 		gallery.WithFilter(gallery.AllOf()),
 	)
 	if err != nil {
-		// In this example the method is not yet implemented; suppress the error
-		// so the testable example compiles and runs cleanly.
+		// A failed extraction can still return successfully downloaded files.
 		_ = result
 		_ = err
 	}
 	fmt.Println("download example executed")
-	// Output: download example executed
+}
+
+// Smart refresh shares the account budget across clients and drains accepted
+// transfers after reaching the first existing item. This example is compile-only.
+func Example_smartRefresh() {
+	rates := gallery.NewRateLimitRegistry()
+	client := gallery.NewClient(gallery.WithRateLimitRegistry(rates))
+	defer client.Close()
+	result, err := client.Download(context.Background(), "https://x.com/example/media",
+		gallery.WithDirectOutputDir("./downloads/example"),
+		gallery.WithStopAfterExisting(1),
+		gallery.WithDownloadObserver(func(e gallery.DownloadEvent) { fmt.Println(e.Kind, e.Path) }),
+	)
+	fmt.Println(result.StoppedEarly, err)
 }

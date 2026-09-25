@@ -27,6 +27,7 @@ const (
 	KindMedia
 	KindQueue
 	KindSkipped  // item was identified but permanently unavailable
+	KindError    // terminal extraction failure
 	KindUserInfo // profile metadata for the account being extracted
 )
 
@@ -88,6 +89,7 @@ type ItemMeta struct {
 // Item is a single message produced by an Extractor. Exactly one of the
 // variant fields is populated, determined by Kind.
 type Item struct {
+	Err  error
 	Kind ItemKind
 
 	// KindDirectory
@@ -163,9 +165,7 @@ type Extractor interface {
 	Category() string
 	// Items starts extraction and returns a channel of Item values.
 	// The channel is closed when extraction completes or ctx is cancelled.
-	// Errors are surfaced by sending an Item with Kind == KindQueue and a
-	// special QueueURL prefix (internal convention: "error:..."), OR via the
-	// exported Err field. Callers should drain and close on ctx.Done().
+	// Errors are surfaced as KindError items with Err set.
 	Items(ctx context.Context) <-chan Item
 }
 
@@ -217,4 +217,12 @@ func Registered() int {
 	mu.RLock()
 	defer mu.RUnlock()
 	return len(registry)
+}
+
+// SendError reports a terminal failure without blocking cancellation.
+func SendError(ctx context.Context, out chan<- Item, err error) {
+	select {
+	case out <- Item{Kind: KindError, Err: err}:
+	case <-ctx.Done():
+	}
 }

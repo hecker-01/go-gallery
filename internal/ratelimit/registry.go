@@ -3,7 +3,9 @@
 package ratelimit
 
 import (
+	"context"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -15,6 +17,7 @@ type Snapshot struct {
 	Limit     int
 	Remaining int
 	ResetAt   time.Time
+	Waiting   bool
 }
 
 // Callback is invoked after every header update and on every 429 hit.
@@ -30,6 +33,8 @@ type Registry struct {
 }
 
 type entry struct {
+	gate      chan struct{}
+	waiting   int
 	mu        sync.Mutex
 	limit     int
 	remaining int
@@ -111,7 +116,7 @@ func (r *Registry) Wait(endpoint string, now time.Time) time.Duration {
 
 	// If remaining == 0 and we have a future reset time, sleep until it.
 	if !resetAt.IsZero() && resetAt.After(now) {
-		return time.Until(resetAt)
+		return resetAt.Sub(now)
 	}
 	return 0
 }
@@ -131,6 +136,7 @@ func (r *Registry) Status(endpoint string) Snapshot {
 		Limit:     e.limit,
 		Remaining: e.remaining,
 		ResetAt:   e.resetAt,
+		Waiting:   e.waiting > 0 || (e.remaining == 0 && e.resetAt.After(time.Now())),
 	}
 	e.mu.Unlock()
 	return s
@@ -150,7 +156,57 @@ func (r *Registry) getOrCreate(endpoint string) *entry {
 	if e, ok = r.entries[endpoint]; ok {
 		return e
 	}
-	e = &entry{}
+	e = &entry{gate: make(chan struct{}, 1)}
 	r.entries[endpoint] = e
 	return e
+}
+
+// Acquire reserves an endpoint request. Release after updating response headers.
+func (r *Registry) Acquire(ctx context.Context, endpoint string) (func(), error) {
+	e := r.getOrCreate(endpoint)
+	e.mu.Lock()
+	e.waiting++
+	e.mu.Unlock()
+	defer func() { e.mu.Lock(); e.waiting--; e.mu.Unlock() }()
+	select {
+	case e.gate <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	release := func() { <-e.gate }
+	if d := r.Wait(endpoint, time.Now()); d > 0 {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			release()
+			return nil, ctx.Err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		release()
+		return nil, err
+	}
+	e.mu.Lock()
+	if e.remaining > 0 {
+		e.remaining--
+	}
+	e.mu.Unlock()
+	return release, nil
+}
+
+func (r *Registry) Snapshots() []Snapshot {
+	r.mu.RLock()
+	keys := make([]string, 0, len(r.entries))
+	for k := range r.entries {
+		keys = append(keys, k)
+	}
+	r.mu.RUnlock()
+	sort.Strings(keys)
+	out := make([]Snapshot, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, r.Status(k))
+	}
+	return out
 }

@@ -594,7 +594,7 @@ func TestUserExtractor_HTTPMock(t *testing.T) {
 					},
 				},
 			})
-		case contains(r.URL.Path, "UserTweets"):
+		case contains(r.URL.Path, "UserMedia"):
 			json.NewEncoder(w).Encode(tweetTimelineFixture())
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -605,7 +605,8 @@ func TestUserExtractor_HTTPMock(t *testing.T) {
 	// Override the GraphQL endpoint base for tests.
 	// We patch the extractor to use the test server.
 	params := extractor.ClientParams{
-		HTTP: srv.Client(),
+		HTTP:    srv.Client(),
+		Twitter: extractor.TwitterOptions{GuestToken: "fixture"},
 	}
 
 	// Create extractor directly to avoid pattern matching in integration mode.
@@ -625,8 +626,17 @@ func TestUserExtractor_HTTPMock(t *testing.T) {
 		items = append(items, item)
 	}
 
-	if len(items) == 0 {
-		t.Log("no items returned (may be due to mock response structure)")
+	media := 0
+	for _, item := range items {
+		if item.Kind == extractor.KindError {
+			t.Fatal(item.Err)
+		}
+		if item.Kind == extractor.KindMedia {
+			media++
+		}
+	}
+	if media != 2 {
+		t.Fatalf("got %d media items", media)
 	}
 }
 

@@ -143,3 +143,18 @@ func ClassifyHTTPStatus(status int, url string, body []byte) error {
 		return &HttpError{StatusCode: status, URL: url, Body: body}
 	}
 }
+
+// UserLookupError identifies failures resolving an account, as distinct from posts/pages.
+type UserLookupError struct{ Err error }
+
+func (e *UserLookupError) Error() string { return "user lookup: " + e.Err.Error() }
+func (e *UserLookupError) Unwrap() error { return e.Err }
+
+// AccountUnavailableError is emitted only for explicit account-level API codes,
+// never for a missing GraphQL endpoint or an unavailable post.
+type AccountUnavailableError struct{ Reason, URL string }
+
+func (e *AccountUnavailableError) Error() string {
+	return (&NotFoundError{Reason: e.Reason, URL: e.URL}).Error()
+}
+func (e *AccountUnavailableError) Unwrap() error { return &NotFoundError{Reason: e.Reason, URL: e.URL} }

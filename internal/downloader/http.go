@@ -72,7 +72,12 @@ func (d *HTTPDownloader) DownloadToFile(ctx context.Context, url, destPath strin
 	return lastErr
 }
 
-func (d *HTTPDownloader) attemptDownload(ctx context.Context, url, destPath, partPath string, cfg Config) error {
+func (d *HTTPDownloader) attemptDownload(ctx context.Context, url, destPath, partPath string, cfg Config) (resultErr error) {
+	defer func() {
+		if resultErr != nil && !cfg.Resume {
+			_ = os.Remove(partPath)
+		}
+	}()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -96,18 +101,37 @@ func (d *HTTPDownloader) attemptDownload(ctx context.Context, url, destPath, par
 	}
 	defer resp.Body.Close()
 
-	// 416 Range Not Satisfiable - the part file is already complete.
+	// A 416 does not prove completeness. Discard stale bytes and retry fresh.
 	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
-		return os.Rename(partPath, destPath)
+		if err := os.Remove(partPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return fmt.Errorf("range rejected; retry from zero")
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return galleryerrs.ClassifyHTTPStatus(resp.StatusCode, url, nil)
 	}
 
+	var expectedTotal int64
+	if resp.StatusCode == http.StatusPartialContent {
+		var lo, hi, total int64
+		if _, err := fmt.Sscanf(resp.Header.Get("Content-Range"), "bytes %d-%d/%d", &lo, &hi, &total); err != nil || lo != partSize || hi < lo || total <= hi || (resp.ContentLength >= 0 && resp.ContentLength != hi-lo+1) {
+			if err := os.Remove(partPath); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			return fmt.Errorf("invalid Content-Range; retry from zero")
+		}
+		expectedTotal = total
+	} else {
+		partSize = 0
+	}
 	// Size validation using Content-Length (pre-download).
 	if cl := resp.ContentLength; cl > 0 {
 		total := partSize + cl
+		if expectedTotal > 0 {
+			total = expectedTotal
+		}
 		if cfg.MinFileSize > 0 && total < cfg.MinFileSize {
 			return permanent(fmt.Errorf("content too small: %d bytes (min %d)", total, cfg.MinFileSize))
 		}
@@ -133,25 +157,38 @@ func (d *HTTPDownloader) attemptDownload(ctx context.Context, url, destPath, par
 		return err
 	}
 
-	// MIME check: read the first 512 bytes from the response and check them.
+	// Validate the actual file prefix, not bytes in the middle of a resumed video.
 	sniff := make([]byte, 512)
-	n, err := io.ReadFull(resp.Body, sniff)
-	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
-		f.Close()
-		if !cfg.Resume {
-			os.Remove(partPath)
+	n := 0
+	if partSize == 0 {
+		n, err = io.ReadFull(resp.Body, sniff)
+		if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+			f.Close()
+			return err
 		}
-		return fmt.Errorf("reading response for MIME sniff: %w", err)
+	}
+	prefix := sniff[:n]
+	if partSize > 0 {
+		old, openErr := os.Open(partPath)
+		if openErr != nil {
+			f.Close()
+			return openErr
+		}
+		buf := make([]byte, 512)
+		readN, readErr := old.Read(buf)
+		old.Close()
+		if readErr != nil && readErr != io.EOF {
+			f.Close()
+			return readErr
+		}
+		prefix = buf[:readN]
+	}
+	if !isAllowedMIME(http.DetectContentType(prefix)) {
+		f.Close()
+		os.Remove(partPath)
+		return permanent(fmt.Errorf("unexpected content type %q", http.DetectContentType(prefix)))
 	}
 	sniff = sniff[:n]
-	mime := http.DetectContentType(sniff)
-	if !isAllowedMIME(mime) {
-		f.Close()
-		// A wrong MIME type means an error page was served; a stale .part of
-		// it must not be resumed, so remove it unconditionally.
-		os.Remove(partPath)
-		return permanent(fmt.Errorf("unexpected content type %q for %s", mime, url))
-	}
 
 	// Write the sniffed bytes then stream the rest.
 	if _, err := f.Write(sniff); err != nil {
@@ -177,6 +214,9 @@ func (d *HTTPDownloader) attemptDownload(ctx context.Context, url, destPath, par
 
 	// Post-download size validation.
 	total := partSize + int64(n) + written
+	if expectedTotal > 0 && total != expectedTotal {
+		return fmt.Errorf("incomplete range: got %d bytes, expected %d", total, expectedTotal)
+	}
 	if cfg.MinFileSize > 0 && total < cfg.MinFileSize {
 		if !cfg.Resume {
 			os.Remove(partPath)

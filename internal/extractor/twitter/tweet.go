@@ -49,6 +49,7 @@ func (e *TwitterTweetExtractor) Items(ctx context.Context) <-chan extractor.Item
 			"withV2Timeline":                         true,
 		})
 		if err != nil {
+			extractor.SendError(ctx, out, err)
 			if e.Params.Logger != nil {
 				e.Params.Logger.Error(fmt.Sprintf("TweetDetail failed for %s: %v", e.tweetID, err))
 			}
@@ -57,6 +58,7 @@ func (e *TwitterTweetExtractor) Items(ctx context.Context) <-chan extractor.Item
 
 		items, err := parseTweetDetail(resp, e.tweetID, e.Params.Twitter)
 		if err != nil {
+			extractor.SendError(ctx, out, err)
 			if e.Params.Logger != nil {
 				e.Params.Logger.Error(fmt.Sprintf("failed to parse TweetDetail for %s: %v", e.tweetID, err))
 			}
@@ -73,4 +75,3 @@ func (e *TwitterTweetExtractor) Items(ctx context.Context) <-chan extractor.Item
 	}()
 	return out
 }
-

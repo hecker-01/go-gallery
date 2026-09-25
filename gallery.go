@@ -5,7 +5,6 @@ package gallery
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,14 +13,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/hecker-01/go-gallery/internal/downloader"
 	"github.com/hecker-01/go-gallery/internal/extractor"
-	"github.com/hecker-01/go-gallery/internal/galleryerrs"
 	"github.com/hecker-01/go-gallery/internal/ratelimit"
 
 	// Blank-import Twitter extractors so their init() registers them.
@@ -63,14 +59,9 @@ func NewClient(opts ...Option) *Client {
 	// Build rate-limit registry after options so the callback is already set.
 	// All user-callback invocations go through the registry so a 429 fires the
 	// callback exactly once (On429 already invokes it).
-	origCb := c.rateLimitCb
-	rlReg := ratelimit.New(func(endpoint string, resetAt time.Time) {
-		if origCb != nil {
-			origCb(endpoint, resetAt)
-		}
-	})
-	c.rlRegistry = rlReg
-	c.rateLimitCb = rlReg.On429
+	if c.rlRegistry == nil {
+		c.rlRegistry = ratelimit.New(nil)
+	}
 
 	if c.httpClient == nil {
 		transport := &http.Transport{
@@ -264,11 +255,18 @@ func (c *Client) Extract(ctx context.Context, url string) (<-chan Message, <-cha
 		defer close(msgs)
 		defer close(errs)
 		for item := range ex.Items(ctx) {
+			if item.Kind == extractor.KindError {
+				errs <- item.Err
+				return
+			}
 			select {
 			case msgs <- convertItem(item):
 			case <-ctx.Done():
 				return
 			}
+		}
+		if ctx.Err() != nil {
+			errs <- ctx.Err()
 		}
 	}()
 	return msgs, errs
@@ -402,199 +400,7 @@ func (c *Client) Download(ctx context.Context, url string, opts ...DownloadOptio
 		}
 	}
 
-	start := time.Now()
-	var (
-		result Result
-		mu     sync.Mutex
-		wg     sync.WaitGroup
-		sem    = make(chan struct{}, c.concurrency)
-	)
-
-	msgs, errs := c.Extract(ctx, url)
-
-	for msg := range msgs {
-		// Handle tombstone / unavailable items emitted by extractors.
-		if skipped, ok := msg.(Skipped); ok {
-			mu.Lock()
-			result.UnavailableFiles++
-			if skipped.Cause != nil {
-				result.Errors = append(result.Errors, skipped.Cause)
-			}
-			mu.Unlock()
-			c.logger.Warn(fmt.Sprintf("unavailable [%s] tweet %s", skipped.Reason, skipped.TweetID))
-			continue
-		}
-
-		// Profile metadata: persist user.json + avatar/banner when requested.
-		if up, ok := msg.(UserProfile); ok {
-			if cfg.WriteUserProfile && !cfg.Simulate {
-				wg.Add(1)
-				go func(up UserProfile) {
-					defer wg.Done()
-					c.writeUserProfile(ctx, cfg, up)
-				}(up)
-			}
-			continue
-		}
-
-		media, ok := msg.(Media)
-		if !ok {
-			continue
-		}
-		info := media.Info
-
-		// Range filter.
-		if cfg.Range != nil && !cfg.Range.Contains(info.Num) {
-			continue
-		}
-
-		// User-supplied filter.
-		if cfg.Filter != nil && !cfg.Filter.Accept(info) {
-			continue
-		}
-
-		// Archive check.
-		if c.archive != nil {
-			archKey := info.TweetID + ":" + strconv.Itoa(info.Num)
-			if has, _ := c.archive.Has(ctx, archKey); has {
-				mu.Lock()
-				result.SkippedFiles++
-				mu.Unlock()
-				continue
-			}
-		}
-
-		if cfg.Simulate {
-			c.logger.Info("[simulate] " + info.MediaURL)
-			mu.Lock()
-			result.TotalFiles++
-			mu.Unlock()
-			continue
-		}
-
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(mi *MediaInfo, mediaURL string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			// Format destination path.
-			kw := mi.Keywords()
-			fname, err := NewFormatter(cfg.FilenameFormat)
-			if err != nil {
-				mu.Lock()
-				result.FailedFiles++
-				result.Errors = append(result.Errors, err)
-				mu.Unlock()
-				return
-			}
-			name := fname.Format(kw)
-			if name == "" || name == "." {
-				name = mi.TweetID + "_" + strconv.Itoa(mi.Num) + "." + mi.Extension
-			}
-			if cfg.FlatDir {
-				name = filepath.Base(name)
-			}
-
-			destPath := filepath.Join(cfg.OutputDir, name)
-			if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-				mu.Lock()
-				result.FailedFiles++
-				result.Errors = append(result.Errors, err)
-				mu.Unlock()
-				return
-			}
-
-			if _, err := os.Stat(destPath); err == nil {
-				c.logger.Info("[skip] already exists: " + destPath)
-				// Backfill any missing sidecars (e.g. metadata JSON) for a file
-				// that was downloaded before those processors were enabled.
-				for _, pp := range cfg.PostProcessors {
-					if bp, ok := pp.(BackfillProcessor); ok {
-						_ = bp.OnExisting(ctx, destPath, mi)
-					}
-				}
-				mu.Lock()
-				result.SkippedFiles++
-				mu.Unlock()
-				return
-			}
-
-			for _, pp := range cfg.PostProcessors {
-				if err := pp.OnPrepare(ctx, mi); err != nil {
-					mu.Lock()
-					result.FailedFiles++
-					result.Errors = append(result.Errors, err)
-					mu.Unlock()
-					return
-				}
-			}
-
-			var dlErr error
-			switch {
-			case dl != nil:
-				f, err := os.Create(destPath)
-				if err != nil {
-					mu.Lock()
-					result.FailedFiles++
-					result.Errors = append(result.Errors, err)
-					mu.Unlock()
-					return
-				}
-				dlErr = dl.Download(ctx, mediaURL, f, cfg)
-				f.Close()
-				if dlErr != nil {
-					os.Remove(destPath)
-				}
-			case isHLSURL(mediaURL):
-				// HLS playlists (videos with no direct mp4 variant) need
-				// yt-dlp; the plain HTTP downloader would save playlist text.
-				dlErr = downloadHLS(ctx, hlsDL, mediaURL, destPath)
-			default:
-				dlErr = fileDL.DownloadToFile(ctx, mediaURL, destPath, fileDLCfg)
-			}
-			if dlErr != nil {
-				mu.Lock()
-				// Classify permanent unavailability separately from transient failures.
-				var nfe *galleryerrs.NotFoundError
-				var authzErr *galleryerrs.AuthorizationError
-				if errors.As(dlErr, &nfe) || errors.As(dlErr, &authzErr) {
-					result.UnavailableFiles++
-				} else {
-					result.FailedFiles++
-				}
-				result.Errors = append(result.Errors, dlErr)
-				mu.Unlock()
-				_ = runPostProcessors(ctx, cfg.PostProcessors, destPath, mi, dlErr)
-				return
-			}
-
-			if ppErr := runPostProcessors(ctx, cfg.PostProcessors, destPath, mi, nil); ppErr != nil {
-				mu.Lock()
-				result.Errors = append(result.Errors, ppErr)
-				mu.Unlock()
-			}
-
-			if c.archive != nil {
-				_ = c.archive.Put(ctx, mi.TweetID+":"+strconv.Itoa(mi.Num))
-			}
-
-			mu.Lock()
-			result.TotalFiles++
-			mu.Unlock()
-			c.logger.Info(destPath)
-		}(info, media.URL)
-	}
-
-	wg.Wait()
-
-	// Drain the error channel (buffered size 1, closed after msgs closes).
-	if extractErr := <-errs; extractErr != nil {
-		return result, extractErr
-	}
-
-	result.Duration = time.Since(start)
-	return result, nil
+	return c.runDownload(ctx, url, cfg, dl, fileDL, fileDLCfg, hlsDL)
 }
 
 // writeUserProfile persists a UserProfile as user.json in cfg.OutputDir and
